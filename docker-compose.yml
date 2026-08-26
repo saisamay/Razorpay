@@ -33,6 +33,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   worker:
     build: .
@@ -50,4 +55,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-

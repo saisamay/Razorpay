@@ -1,60 +1,135 @@
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import time
+from uuid import uuid4
 
 from sqlalchemy import select
 
-from .database import Base, build_session_factory
-from .models import RawEvent
-from .queue import EventQueue, STREAM_NAME
-from .service import process_event
+from .database import build_session_factory, ensure_schema
+from .models import RawEvent, ReconciliationAttempt
+from .observability import QUEUE_LAG, structured_log
+from .queue import EventQueue, RECONCILIATION_STREAM_NAME, STREAM_NAME
+from .service import mark_processing_timeouts, process_event, run_reconciliation
 from .settings import Settings
+
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
+EVENT_GROUP = "state-reconstructors"
+RECONCILIATION_GROUP = "reconcilers"
 
 
-def _process(factory, event_id: str) -> None:
+def worker_identity() -> str:
+    return f"stage1-{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
+
+
+def _ensure_group(queue: EventQueue, stream: str, group: str) -> None:
+    try:
+        queue.client.xgroup_create(stream, group, id="0", mkstream=True)
+    except Exception as exc:
+        if "BUSYGROUP" not in str(exc):
+            raise
+
+
+def _process(factory, event_id: str, worker_id: str) -> bool:
+    """True means the transaction committed and it is now safe to ACK Redis."""
     with factory() as session:
         try:
-            process_event(session, event_id)
+            process_event(session, event_id, worker_id=worker_id)
             session.commit()
+            return True
         except Exception:
             session.rollback()
-            logger.exception('{"event":"processing_failed","raw_event_id":"%s"}', event_id)
+            structured_log(logger, "processing_failed", correlation_id=event_id, worker_id=worker_id)
+            logger.exception("event processing failed")
+            return False
+
+
+def _sweep_pending(factory, worker_id: str) -> None:
+    with factory() as session:
+        pending = session.scalars(select(RawEvent.id).where(RawEvent.processing_status == "PENDING").limit(100)).all()
+    for event_id in pending:
+        _process(factory, event_id, worker_id)
+
+
+def _sweep_timeouts(factory, timeout_seconds: int) -> list[str]:
+    with factory() as session:
+        payment_ids = mark_processing_timeouts(session, timeout_seconds)
+        session.commit()
+        return payment_ids
+
+
+def _sweep_reconciliation(factory) -> list[str]:
+    with factory() as session:
+        return session.scalars(select(ReconciliationAttempt.payment_id).where(ReconciliationAttempt.status == "PENDING").limit(100)).all()
+
+
+def _handle_event_entries(queue: EventQueue, factory, entries, worker_id: str) -> None:
+    for message_id, data in entries:
+        event_id = data.get("event_id")
+        if event_id and _process(factory, event_id, worker_id):
+            queue.client.xack(STREAM_NAME, EVENT_GROUP, message_id)
+
+
+def _handle_reconciliation_entries(queue: EventQueue, factory, settings: Settings, entries, worker_id: str) -> None:
+    for message_id, data in entries:
+        payment_id = data.get("payment_id")
+        committed = False
+        try:
+            committed = bool(payment_id) and run_reconciliation(factory, settings, payment_id, worker_id=worker_id)
+        except Exception:
+            structured_log(logger, "reconciliation_processing_failed", payment_id=payment_id, worker_id=worker_id)
+            logger.exception("reconciliation processing failed")
+        if committed:
+            queue.client.xack(RECONCILIATION_STREAM_NAME, RECONCILIATION_GROUP, message_id)
 
 
 def main() -> None:
     settings = Settings.from_environment()
     factory = build_session_factory(settings)
-    Base.metadata.create_all(factory.kw["bind"])
+    ensure_schema(factory)
     queue = EventQueue(settings.redis_url)
-    consumer = "stage1-worker"
-    group = "state-reconstructors"
-    try:
-        queue.client.xgroup_create(STREAM_NAME, group, id="0", mkstream=True)
-    except Exception as exc:
-        if "BUSYGROUP" not in str(exc):
-            raise
+    worker_id = worker_identity()
+    _ensure_group(queue, STREAM_NAME, EVENT_GROUP)
+    _ensure_group(queue, RECONCILIATION_STREAM_NAME, RECONCILIATION_GROUP)
+    structured_log(logger, "worker_started", worker_id=worker_id)
+    last_housekeeping = 0.0
 
     while True:
-        # The sweep makes delivery recoverable after a Redis outage between DB commit and XADD.
-        with factory() as session:
-            pending = session.scalars(select(RawEvent.id).where(RawEvent.processing_status == "PENDING").limit(100)).all()
-        for event_id in pending:
-            _process(factory, event_id)
+        # First reclaim abandoned entries.  A crash after COMMIT but before ACK is
+        # harmless because processing is idempotent; a crash before COMMIT is retried.
+        _handle_event_entries(queue, factory, queue.reclaim(STREAM_NAME, EVENT_GROUP, worker_id, settings.redis_claim_idle_ms), worker_id)
+        _handle_reconciliation_entries(queue, factory, settings,
+                                      queue.reclaim(RECONCILIATION_STREAM_NAME, RECONCILIATION_GROUP, worker_id, settings.redis_claim_idle_ms), worker_id)
 
-        messages = queue.client.xreadgroup(group, consumer, {STREAM_NAME: ">"}, count=20, block=1000)
+        now = time.monotonic()
+        if now - last_housekeeping >= 5:
+            _sweep_pending(factory, worker_id)
+            for payment_id in _sweep_timeouts(factory, settings.processing_timeout_seconds):
+                try:
+                    queue.publish_reconciliation(payment_id)
+                except Exception:
+                    structured_log(logger, "reconciliation_queue_publish_failed", payment_id=payment_id, worker_id=worker_id)
+            # This durable sweep covers a Redis outage after an UNKNOWN commit.
+            for payment_id in _sweep_reconciliation(factory):
+                try:
+                    queue.publish_reconciliation(payment_id)
+                except Exception:
+                    structured_log(logger, "reconciliation_queue_publish_failed", payment_id=payment_id, worker_id=worker_id)
+            QUEUE_LAG.labels(STREAM_NAME).set(queue.queue_lag(STREAM_NAME))
+            QUEUE_LAG.labels(RECONCILIATION_STREAM_NAME).set(queue.queue_lag(RECONCILIATION_STREAM_NAME))
+            last_housekeeping = now
+
+        messages = queue.client.xreadgroup(EVENT_GROUP, worker_id, {STREAM_NAME: ">"}, count=20, block=500)
         for _, entries in messages:
-            for message_id, data in entries:
-                event_id = data.get("event_id")
-                if event_id:
-                    _process(factory, event_id)
-                queue.client.xack(STREAM_NAME, group, message_id)
-        time.sleep(0.05)
+            _handle_event_entries(queue, factory, entries, worker_id)
+        reconciliation_messages = queue.client.xreadgroup(RECONCILIATION_GROUP, worker_id, {RECONCILIATION_STREAM_NAME: ">"}, count=20, block=500)
+        for _, entries in reconciliation_messages:
+            _handle_reconciliation_entries(queue, factory, settings, entries, worker_id)
 
 
 if __name__ == "__main__":
     main()
-

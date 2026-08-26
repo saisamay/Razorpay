@@ -13,7 +13,10 @@ payment state. It deliberately stops before choosing or sending a recovery actio
 - Terminal-state protection: a captured payment is never downgraded by later negative evidence.
 - Anomaly recording for out-of-order and contradictory evidence.
 - An idempotent `RecoveryCase` only for a currently failed payment.
-- Redis Streams dispatch, a retrying worker, replay, a dead-letter table, and read APIs.
+- Indexed payment correlation and timelines—one payment never requires a raw-event table scan.
+- Redis Streams dispatch with unique worker identities, pending-entry reclaim, and DB commit before ACK.
+- `PROCESSING → UNKNOWN` timeout handling and audited Razorpay API reconciliation; a timeout itself never starts recovery.
+- Dead-letter inspection/replay, Prometheus-text metrics, structured correlation logs, and liveness/readiness checks.
 
 ## Run locally
 
@@ -31,11 +34,15 @@ The API is available at `http://localhost:8000`. Swagger UI is at `/docs`.
 - `GET /payments/{payment_id}/state` — derived state and recovery gate.
 - `GET /payments/{payment_id}/timeline` — raw-evidence references plus canonical events.
 - `GET /recovery-cases/{case_id}` — normalized Stage-1 output.
+- `GET /health/live` / `GET /health/ready` — process and dependency/configuration health.
+- `GET /metrics` — operational counters and latency/queue metrics.
+- `GET /internal/dlq/{event_id}` — inspected dead-letter reason and failure history.
 - `POST /internal/replay/{event_id}` — queues an already persisted event again.
 
-`/internal/replay` must be protected by the deployment's internal network/authentication
-layer before any non-local deployment. Its authorization is intentionally not hard-coded
-because the identity provider has not been selected.
+Set `INTERNAL_API_TOKEN` and send it as `X-Internal-Token` for internal replay/DLQ
+operations. The application refuses to start ready outside local/test environments
+without this token. Reconciliation uses `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`;
+an API timeout or error is audited but never changes payment truth.
 
 ## Design boundary
 
@@ -47,3 +54,8 @@ the endpoint returns a non-2xx so Razorpay's documented retry policy redelivers 
 Raw payloads are retained in the database for this prototype. Move `raw_payload` to
 encrypted object storage and preserve a URI reference before production use.
 
+## Scope boundary
+
+Stage 1.1 is still payment-centric. A checkout that fails before Razorpay creates a
+`payment_id` is explicitly out of scope; it requires a future `CheckoutAttempt →
+PaymentAttempt → PaymentState` model rather than guessing a failed payment.
