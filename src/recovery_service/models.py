@@ -84,7 +84,9 @@ class RecoveryCase(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     recovery_eligible: Mapped[bool] = mapped_column(nullable=False)
     eligibility_reason: Mapped[str] = mapped_column(String(100), nullable=False)
-    schema_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+    schema_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.5")
+    source_event_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    stage1_state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
 class DeadLetterEvent(Base):
@@ -111,3 +113,16 @@ class ReconciliationAttempt(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING", index=True)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AuditLogEntry(Base):
+    __tablename__ = "audit_log_entries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    operation: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    event_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+

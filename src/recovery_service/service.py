@@ -10,9 +10,9 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import DeadLetterEvent, PaymentProcessingLock, PaymentState, RawEvent, ReconciliationAttempt, RecoveryCase, utc_now
-from .normalizer import NormalizationError, normalize_razorpay_event
-from .observability import CONTRADICTIONS, DLQ_EVENTS, LATE_EVENTS, OUT_OF_ORDER_EVENTS, PROCESSING_LATENCY, PROCESSED_EVENTS, RECOVERY_CASES, STATE_TRANSITIONS, UNKNOWN_STATES, structured_log
+from .models import AuditLogEntry, DeadLetterEvent, PaymentProcessingLock, PaymentState, RawEvent, ReconciliationAttempt, RecoveryCase, utc_now
+from .normalizer import NormalizationError, QuarantineError, normalize_razorpay_event
+from .observability import CONTRADICTIONS, DLQ_EVENTS, LATE_EVENTS, OUT_OF_ORDER_EVENTS, PROCESSING_LATENCY, PROCESSED_EVENTS, QUARANTINE_EVENTS, RECOVERY_CASES, STATE_TRANSITIONS, UNKNOWN_STATES, audit_log, structured_log
 from .reconciliation import ReconciliationError, fetch_payment_status, reconciliation_event_payload
 from .schemas import CanonicalEvent, RecoveryGate, StateView
 from .settings import Settings
@@ -64,8 +64,9 @@ def _record_reduction_metrics(previous_state: str | None, reduction) -> None:
             CONTRADICTIONS.labels(kind).inc()
 
 
-def _upsert_recovery_case(session: Session, state: PaymentState, reduction) -> None:
+def _upsert_recovery_case(session: Session, state: PaymentState, reduction, evidence: list[CanonicalEvent]) -> None:
     gate = recovery_gate(reduction)
+    source_event_ids = [item.event_id for item in evidence]
     existing_cases = session.scalars(select(RecoveryCase).where(RecoveryCase.payment_id == state.payment_id).with_for_update()).all()
     for existing_case in existing_cases:
         was_eligible = existing_case.recovery_eligible
@@ -74,6 +75,8 @@ def _upsert_recovery_case(session: Session, state: PaymentState, reduction) -> N
         existing_case.state_confidence = state.state_confidence
         existing_case.recovery_eligible = gate.recovery_eligible
         existing_case.eligibility_reason = gate.reason
+        existing_case.source_event_ids = source_event_ids
+        existing_case.stage1_state_version = state.state_version
         if was_eligible and not gate.recovery_eligible:
             RECOVERY_CASES.labels("revoked").inc()
 
@@ -88,10 +91,13 @@ def _upsert_recovery_case(session: Session, state: PaymentState, reduction) -> N
             state=state.state, state_confidence=state.state_confidence,
             failure_evidence=reduction.failure_evidence.model_dump(mode="json"), first_seen_at=state.first_seen_at,
             last_seen_at=state.last_seen_at, recovery_eligible=True, eligibility_reason=gate.reason,
+            schema_version="1.5", source_event_ids=source_event_ids, stage1_state_version=state.state_version,
         ))
         RECOVERY_CASES.labels("created").inc()
     else:
         recovery_case.failure_evidence = reduction.failure_evidence.model_dump(mode="json")
+        recovery_case.source_event_ids = source_event_ids
+        recovery_case.stage1_state_version = state.state_version
 
 
 def _move_to_dlq(session: Session, event: RawEvent, error: str) -> None:
@@ -130,6 +136,8 @@ def process_event(session: Session, event_id: str, *, worker_id: str | None = No
         return ProcessingResult(event_id, None, "MISSING")
     if event.processing_status == "PROCESSED":
         return ProcessingResult(event_id, event.payment_id, "ALREADY_PROCESSED")
+    if event.processing_status == "QUARANTINED":
+        return ProcessingResult(event_id, event.payment_id, "QUARANTINED")
 
     event.processing_attempts += 1
     try:
@@ -166,7 +174,7 @@ def process_event(session: Session, event_id: str, *, worker_id: str | None = No
             state.last_seen_at = last_seen
             state.state_version += 1
 
-        _upsert_recovery_case(session, state, reduction)
+        _upsert_recovery_case(session, state, reduction, evidence)
         event.processing_status = "PROCESSED"
         event.last_error = None
         dead_letter = session.get(DeadLetterEvent, event.id)
@@ -175,11 +183,19 @@ def process_event(session: Session, event_id: str, *, worker_id: str | None = No
         _record_reduction_metrics(previous_state, reduction)
         PROCESSED_EVENTS.inc()
         PROCESSING_LATENCY.observe(max(0.0, (utc_now() - _utc(event.received_at)).total_seconds()))
+        audit_log(session, "STATE_RECONSTRUCTED", event_id=event.source_event_id, payment_id=canonical.payment_id, actor=worker_id or "worker", details={"state_after": state.state, "state_version": state.state_version})
         structured_log(logger, "event_processed", event_id=event.source_event_id, payment_id=canonical.payment_id,
                        order_id=canonical.order_id, merchant_id=canonical.merchant_id, worker_id=worker_id,
                        correlation_id=event.id, state_before=previous_state, state_after=state.state,
                        state_version=state.state_version)
         return ProcessingResult(event_id, canonical.payment_id, "PROCESSED")
+    except QuarantineError as exc:
+        error = str(exc)
+        event.processing_status = "QUARANTINED"
+        event.last_error = error
+        QUARANTINE_EVENTS.inc()
+        audit_log(session, "QUARANTINE_APPLIED", event_id=event.source_event_id, payment_id=event.payment_id, actor=worker_id or "worker", details={"reason": error})
+        return ProcessingResult(event_id, event.payment_id, "QUARANTINED")
     except (NormalizationError, ValidationError) as exc:
         error = str(exc)
         event.last_error = error

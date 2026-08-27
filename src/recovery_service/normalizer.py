@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .models import RawEvent
@@ -11,12 +11,23 @@ class NormalizationError(ValueError):
     pass
 
 
+class QuarantineError(ValueError):
+    """Raised when an authenticated payload fails semantic constraints and should be quarantined."""
+    pass
+
+
 def _timestamp(value: Any, fallback: datetime) -> datetime:
     if isinstance(value, (int, float)):
+        # Check bounds: timestamp < 2020 or > +24h in future
+        if value < 1577836800 or value > (datetime.now(timezone.utc).timestamp() + 86400):
+            raise QuarantineError(f"timestamp out of valid range: {value}")
         return datetime.fromtimestamp(value, tz=timezone.utc)
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.year < 2020 or dt > (datetime.now(timezone.utc) + timedelta(days=1)):
+                raise QuarantineError(f"timestamp string out of valid range: {value}")
+            return dt
         except ValueError:
             pass
     return fallback
@@ -39,6 +50,17 @@ def normalize_razorpay_event(event: RawEvent) -> CanonicalEvent:
     payment_id = payment_entity.get("id")
     if not isinstance(payment_id, str) or not payment_id:
         raise NormalizationError("missing payment id")
+    if len(payment_id) > 255:
+        raise QuarantineError("payment id exceeds maximum length of 255 characters")
+
+    amount = payment_entity.get("amount")
+    if isinstance(amount, (int, float)) and amount < 0:
+        raise QuarantineError(f"invalid negative monetary amount: {amount}")
+
+    currency = payment_entity.get("currency")
+    if currency is not None:
+        if not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
+            raise QuarantineError(f"invalid ISO 4217 currency representation: {currency}")
 
     failure = None
     if webhook_type == "payment.failed":
@@ -58,8 +80,8 @@ def normalize_razorpay_event(event: RawEvent) -> CanonicalEvent:
         merchant_id=payload.get("account_id"),
         order_id=payment_entity.get("order_id"),
         payment_id=payment_id,
-        amount=payment_entity.get("amount"),
-        currency=payment_entity.get("currency") or None,
+        amount=amount,
+        currency=currency.upper() if isinstance(currency, str) else None,
         payment_method=payment_entity.get("method"),
         raw_reference=f"db://raw-events/{event.id}",
         failure=failure,

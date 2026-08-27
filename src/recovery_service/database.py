@@ -39,6 +39,10 @@ def ensure_schema(session_factory: sessionmaker[Session]) -> None:
             "occurred_at": "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME",
         },
         "dead_letter_events": {"first_error": "TEXT"},
+        "recovery_cases": {
+            "source_event_ids": "JSON" if engine.dialect.name == "postgresql" else "TEXT",
+            "stage1_state_version": "INTEGER",
+        },
     }
     tables = set(inspector.get_table_names())
     with engine.begin() as connection:

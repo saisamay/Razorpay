@@ -8,6 +8,7 @@ from redis import Redis
 logger = logging.getLogger(__name__)
 STREAM_NAME = "recovery:events"
 RECONCILIATION_STREAM_NAME = "recovery:reconciliation"
+CASES_STREAM_NAME = "recovery:cases"
 
 
 class EventQueue:
@@ -19,6 +20,9 @@ class EventQueue:
 
     def publish_reconciliation(self, payment_id: str) -> None:
         self.client.xadd(RECONCILIATION_STREAM_NAME, {"payment_id": payment_id})
+
+    def publish_case(self, case_id: str) -> None:
+        self.client.xadd(CASES_STREAM_NAME, {"case_id": case_id})
 
     def reclaim(self, stream: str, group: str, consumer: str, min_idle_ms: int):
         """Claim abandoned deliveries before consuming new work."""

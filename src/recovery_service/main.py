@@ -17,6 +17,7 @@ from .observability import DUPLICATE_EVENTS, INGESTED_EVENTS, INVALID_EVENTS, me
 from .queue import EventQueue
 from .service import state_view
 from .settings import Settings
+from .stage2.api import stage2_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -74,7 +75,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Razorpay Revenue Recovery — Stage 1", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Razorpay Revenue Recovery", version="2.0.0", lifespan=lifespan)
+app.include_router(stage2_router)
 
 
 @app.get("/health/live")
@@ -112,8 +114,34 @@ def metrics() -> Response:
     return Response(content=payload, media_type=media_type)
 
 
+def _check_json_nesting_depth(obj: Any, current_depth: int = 1, max_depth: int = 10) -> None:
+    if current_depth > max_depth:
+        raise ValueError(f"JSON nesting depth exceeds safety limit of {max_depth}")
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _check_json_nesting_depth(v, current_depth + 1, max_depth)
+    elif isinstance(obj, list):
+        for item in obj:
+            _check_json_nesting_depth(item, current_depth + 1, max_depth)
+
+
+_REQUEST_TIMESTAMPS: list[float] = []
+
+
+def _check_rate_limit(max_per_sec: int = 200) -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    global _REQUEST_TIMESTAMPS
+    _REQUEST_TIMESTAMPS = [t for t in _REQUEST_TIMESTAMPS if now - t < 1.0]
+    if len(_REQUEST_TIMESTAMPS) >= max_per_sec:
+        from .observability import RATE_LIMIT_EXCEEDED
+        RATE_LIMIT_EXCEEDED.inc()
+        raise HTTPException(status_code=429, detail="too many webhook requests")
+    _REQUEST_TIMESTAMPS.append(now)
+
+
 @app.post("/webhooks/razorpay", status_code=status.HTTP_202_ACCEPTED)
 async def razorpay_webhook(request: Request) -> dict[str, str | bool]:
+    _check_rate_limit()
     settings: Settings = request.app.state.settings
     raw_body = await request.body()
     if len(raw_body) > settings.max_webhook_bytes:
@@ -130,8 +158,11 @@ async def razorpay_webhook(request: Request) -> dict[str, str | bool]:
         raise HTTPException(status_code=400, detail="missing x-razorpay-event-id")
     try:
         payload = json.loads(raw_body)
-        event_type = payload["event"]
-        if not isinstance(payload, dict) or not isinstance(event_type, str) or not event_type:
+        if not isinstance(payload, dict):
+            raise ValueError("top-level payload must be a JSON object")
+        _check_json_nesting_depth(payload)
+        event_type = payload.get("event")
+        if not isinstance(event_type, str) or not event_type:
             raise ValueError("event must be a non-empty string")
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         INVALID_EVENTS.labels("malformed_payload").inc()
@@ -194,6 +225,34 @@ def get_recovery_case(case_id: str, request: Request):
         if recovery_case is None:
             raise HTTPException(status_code=404, detail="recovery case not found")
         return recovery_case
+
+
+@app.get("/recovery-cases/{case_id}/contract")
+def get_recovery_case_contract(case_id: str, request: Request):
+    """Stage 2 security boundary contract validation endpoint."""
+    with request.app.state.sessions() as session:
+        case = session.get(RecoveryCase, case_id)
+        if case is None:
+            raise HTTPException(status_code=404, detail="recovery case not found")
+        return {
+            "case_id": case.case_id,
+            "payment_id": case.payment_id,
+            "recovery_episode_id": case.recovery_episode_id,
+            "merchant_id": case.merchant_id,
+            "order_id": case.order_id,
+            "amount": case.amount,
+            "currency": case.currency,
+            "state": case.state,
+            "state_confidence": case.state_confidence,
+            "failure_evidence": case.failure_evidence,
+            "recovery_eligible": case.recovery_eligible,
+            "eligibility_reason": case.eligibility_reason,
+            "schema_version": case.schema_version,
+            "source_event_ids": case.source_event_ids,
+            "stage1_state_version": case.stage1_state_version,
+            "first_seen_at": case.first_seen_at,
+            "last_seen_at": case.last_seen_at,
+        }
 
 
 @app.get("/internal/dlq/{event_id}")

@@ -62,6 +62,9 @@ def Histogram(name: str, description: str) -> _Metric:
     return _Metric(name, description, kind="histogram")
 
 
+QUARANTINE_EVENTS = Counter("recovery_events_quarantine_total", "Quarantined webhook events")
+RATE_LIMIT_EXCEEDED = Counter("recovery_rate_limit_exceeded_total", "Rate-limit triggers")
+VERSION_CONFLICTS = Counter("recovery_version_conflicts_total", "Optimistic version conflicts")
 INGESTED_EVENTS = Counter("recovery_events_ingested_total", "Accepted webhook events")
 DUPLICATE_EVENTS = Counter("recovery_events_duplicate_total", "Duplicate webhook events")
 INVALID_EVENTS = Counter("recovery_events_invalid_total", "Rejected webhook events", ["reason"])
@@ -76,6 +79,13 @@ RECONCILIATION_ATTEMPTS = Counter("recovery_reconciliation_attempts_total", "Rec
 RECOVERY_CASES = Counter("recovery_cases_total", "Recovery case lifecycle", ["action"])
 PROCESSING_LATENCY = Histogram("recovery_event_processing_seconds", "Webhook receipt to processing latency")
 QUEUE_LAG = Gauge("recovery_queue_lag", "Approximate Redis stream length", ["stream"])
+
+
+def audit_log(session: Any, operation: str, *, event_id: str | None = None, payment_id: str | None = None, actor: str = "system", details: dict | None = None) -> None:
+    """Record an immutable, security-sensitive audit trail entry."""
+    from .models import AuditLogEntry
+    entry = AuditLogEntry(operation=operation, event_id=event_id, payment_id=payment_id, actor=actor, details=details or {})
+    session.add(entry)
 
 
 def structured_log(logger: logging.Logger, name: str, **values: Any) -> None:

@@ -9,7 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from .database import build_session_factory, ensure_schema
-from .models import RawEvent, ReconciliationAttempt
+from .models import RawEvent, ReconciliationAttempt, RecoveryCase
 from .observability import QUEUE_LAG, structured_log
 from .queue import EventQueue, RECONCILIATION_STREAM_NAME, STREAM_NAME
 from .service import mark_processing_timeouts, process_event, run_reconciliation
@@ -87,6 +87,17 @@ def _handle_reconciliation_entries(queue: EventQueue, factory, settings: Setting
             queue.client.xack(RECONCILIATION_STREAM_NAME, RECONCILIATION_GROUP, message_id)
 
 
+def _sweep_cases(factory, queue: EventQueue) -> list[str]:
+    with factory() as session:
+        cases = session.scalars(select(RecoveryCase.case_id).where(RecoveryCase.recovery_eligible == True).limit(100)).all()
+    for case_id in cases:
+        try:
+            queue.publish_case(case_id)
+        except Exception:
+            pass
+    return cases
+
+
 def main() -> None:
     settings = Settings.from_environment()
     factory = build_session_factory(settings)
@@ -108,6 +119,7 @@ def main() -> None:
         now = time.monotonic()
         if now - last_housekeeping >= 5:
             _sweep_pending(factory, worker_id)
+            _sweep_cases(factory, queue)
             for payment_id in _sweep_timeouts(factory, settings.processing_timeout_seconds):
                 try:
                     queue.publish_reconciliation(payment_id)
