@@ -222,3 +222,134 @@ def process_failure_fingerprint(
         stage2_case.status = "FINGERPRINTED"
 
     return manifest, diag, fdna, temporal
+
+
+def process_p1_pipeline(
+    session: Session,
+    contract: RecoveryCaseContract,
+    *,
+    timeline_events: list[dict] | None = None,
+    reconciliation_evidence: dict | None = None,
+    worker_id: str | None = None,
+) -> tuple[RecoveryGenome, DecisionProposal, ShadowEvaluation]:
+    """Run full Stage 2 P1 Pipeline: P0-A..E -> Incident -> Compliance -> Genome -> Candidates -> Counterfactual -> Optimizer -> Proposal -> Shadow."""
+
+    from .capability_matrix import generate_action_candidates
+    from .compliance import evaluate_compliance_eligibility
+    from .counterfactual import evaluate_counterfactual_candidates
+    from .genome import assemble_recovery_genome
+    from .incident_clusterer import evaluate_incident_cluster
+    from .models import IncidentClusterRecord, RecoveryEligibilityRecord, RecoveryGenomeRecord
+    from .optimizer import optimize_recovery_decision
+    from .schemas import DecisionProposal, RecoveryGenome, ShadowEvaluation
+    from .shadow import create_shadow_evaluation
+
+    manifest, diag, fdna, temporal = process_failure_fingerprint(
+        session, contract, timeline_events=timeline_events, reconciliation_evidence=reconciliation_evidence, worker_id=worker_id
+    )
+
+    incident = evaluate_incident_cluster(fdna, temporal, manifest)
+    compliance = evaluate_compliance_eligibility(manifest, diag)
+
+    genome = assemble_recovery_genome(manifest, diag, fdna, temporal, incident, compliance)
+
+    stage2_case = session.get(Stage2Case, (contract.case_id, contract.stage1_state_version), with_for_update=True)
+    if stage2_case is not None and stage2_case.status == "STALE_SUPERSEDED":
+        candidates = generate_action_candidates(genome)
+        sims = evaluate_counterfactual_candidates(genome, candidates)
+        prop = optimize_recovery_decision(genome, sims)
+        shd = create_shadow_evaluation(genome, prop)
+        return genome, prop, shd
+
+    if incident.incident_id != "NO_INCIDENT":
+        inc_rec = session.get(IncidentClusterRecord, incident.incident_id, with_for_update=True)
+        if inc_rec is None:
+            session.add(IncidentClusterRecord(
+                incident_id=incident.incident_id,
+                dimensions=incident.dimensions,
+                affected_case_count=incident.affected_case_count,
+                affected_volume_bucket=incident.affected_volume_bucket,
+                failure_rate_delta=incident.failure_rate_delta,
+                baseline_failure_rate=incident.baseline_failure_rate,
+                current_failure_rate=incident.current_failure_rate,
+                incident_confidence=incident.incident_confidence,
+                status=incident.status,
+                engine_version=incident.engine_version,
+                started_at=incident.started_at,
+                last_seen_at=incident.last_seen_at,
+            ))
+
+    el_id = f"el_{genome.genome_id}"
+    el_rec = session.get(RecoveryEligibilityRecord, el_id, with_for_update=True)
+    if el_rec is None:
+        session.add(RecoveryEligibilityRecord(
+            eligibility_id=el_id,
+            case_id=contract.case_id,
+            stage1_state_version=contract.stage1_state_version,
+            eligibility=compliance.eligibility,
+            attempts_remaining=compliance.attempts_remaining,
+            advice_code=compliance.advice_code,
+            required_delay_seconds=compliance.required_delay,
+            projected_penalty=compliance.projected_penalty,
+            ruleset_version=compliance.ruleset_version,
+            evaluated_at=compliance.evaluated_at,
+        ))
+
+    gen_rec = session.get(RecoveryGenomeRecord, genome.genome_id, with_for_update=True)
+    if gen_rec is None:
+        session.add(RecoveryGenomeRecord(
+            genome_id=genome.genome_id,
+            case_id=contract.case_id,
+            stage1_state_version=contract.stage1_state_version,
+            genome_schema_version=genome.provenance.genome_schema_version,
+            p0_snapshot=genome.p0_source.model_dump(mode="json"),
+            p1_snapshot=genome.p1_source.model_dump(mode="json"),
+            source_versions=genome.provenance.model_dump(mode="json"),
+            assembled_at=genome.provenance.assembled_at,
+        ))
+
+    candidates = generate_action_candidates(genome)
+    sims = evaluate_counterfactual_candidates(genome, candidates)
+
+    proposal = optimize_recovery_decision(genome, sims)
+
+    from .models import DecisionProposalRecord, ShadowEvaluationRecord
+
+    prop_rec = session.get(DecisionProposalRecord, proposal.proposal_id, with_for_update=True)
+    if prop_rec is None:
+        session.add(DecisionProposalRecord(
+            proposal_id=proposal.proposal_id,
+            case_id=contract.case_id,
+            genome_id=genome.genome_id,
+            stage1_state_version=contract.stage1_state_version,
+            selected_action=proposal.selected_action,
+            predicted_success_probability=proposal.predicted_success_probability,
+            expected_net_value=proposal.expected_net_value,
+            data=proposal.model_dump(mode="json"),
+            created_at=proposal.created_at,
+        ))
+
+    if stage2_case is not None:
+        stage2_case.status = "PROPOSAL_READY"
+
+    shadow_eval = create_shadow_evaluation(genome, proposal)
+
+    shd_rec = session.get(ShadowEvaluationRecord, shadow_eval.shadow_id, with_for_update=True)
+    if shd_rec is None:
+        session.add(ShadowEvaluationRecord(
+            shadow_id=shadow_eval.shadow_id,
+            case_id=contract.case_id,
+            genome_id=genome.genome_id,
+            proposal_id=proposal.proposal_id,
+            baseline_action=shadow_eval.baseline_action,
+            stage2_proposed_action=shadow_eval.stage2_proposed_action,
+            baseline_outcome=shadow_eval.baseline_outcome,
+            would_have_recovered_amount=shadow_eval.would_have_recovered_amount,
+            decision_delta=shadow_eval.decision_delta,
+            created_at=shadow_eval.created_at,
+        ))
+
+    if stage2_case is not None:
+        stage2_case.status = "PUBLISHED"
+
+    return genome, proposal, shadow_eval

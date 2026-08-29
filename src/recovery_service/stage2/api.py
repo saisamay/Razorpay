@@ -141,6 +141,45 @@ def get_case_history(
         ]
 
 
+@stage2_router.get("/cases/{case_id}/genome")
+def get_case_genome(
+    case_id: str,
+    request: Request,
+    x_merchant_id: str | None = Header(default=None),
+):
+    """Tenant-authorized read endpoint for RecoveryGenome snapshot."""
+
+    from .models import RecoveryGenomeRecord
+
+    factory = request.app.state.sessions
+    with factory() as session:
+        case = session.get(RecoveryCase, case_id)
+        if case is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case {case_id} not found")
+
+        _verify_tenant_access(case, x_merchant_id)
+
+        rec = session.scalars(
+            select(RecoveryGenomeRecord)
+            .where(RecoveryGenomeRecord.case_id == case_id)
+            .order_by(RecoveryGenomeRecord.stage1_state_version.desc())
+        ).first()
+
+        if rec is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No RecoveryGenome found for case {case_id}")
+
+        return {
+            "genome_id": rec.genome_id,
+            "case_id": rec.case_id,
+            "stage1_state_version": rec.stage1_state_version,
+            "genome_schema_version": rec.genome_schema_version,
+            "p0_source": rec.p0_snapshot,
+            "p1_source": rec.p1_snapshot,
+            "provenance": rec.source_versions,
+            "assembled_at": rec.assembled_at,
+        }
+
+
 @stage2_router.post("/cases/{case_id}/reprocess")
 def reprocess_case(
     case_id: str,

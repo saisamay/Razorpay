@@ -18,6 +18,8 @@ from .queue import EventQueue
 from .service import state_view
 from .settings import Settings
 from .stage2.api import stage2_router
+from .stage2.dashboard import dashboard_router
+from .stage2.eval_api import eval_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -77,6 +79,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Razorpay Revenue Recovery", version="2.0.0", lifespan=lifespan)
 app.include_router(stage2_router)
+app.include_router(eval_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/health/live")

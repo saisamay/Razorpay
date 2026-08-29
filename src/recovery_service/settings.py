@@ -18,6 +18,7 @@ class Settings:
     razorpay_key_secret: str | None = None
     razorpay_api_base_url: str = "https://api.razorpay.com/v1"
     reconciliation_timeout_seconds: float = 5.0
+    openai_api_key: str | None = None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -36,6 +37,7 @@ class Settings:
             razorpay_key_secret=os.getenv("RAZORPAY_KEY_SECRET") or None,
             razorpay_api_base_url=os.getenv("RAZORPAY_API_BASE_URL", "https://api.razorpay.com/v1").rstrip("/"),
             reconciliation_timeout_seconds=float(os.getenv("RECONCILIATION_TIMEOUT_SECONDS", "5")),
+            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         )
 
     def readiness_errors(self) -> list[str]:
