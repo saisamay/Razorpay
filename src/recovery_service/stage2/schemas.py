@@ -321,3 +321,33 @@ class OutcomeAttribution(BaseModel):
     attribution_rule_version: str = "1.0"
     created_at: datetime
     finalized_at: datetime | None = None
+
+
+class ExperimentAssignmentResult(BaseModel):
+    assignment_id: str
+    binding_id: str
+    experiment_id: str
+    experiment_version: str
+    merchant_id: str
+    assignment_arm: str  # CONTROL, TREATMENT, UNASSIGNED, EXCLUDED, TERMINAL_FAILURE
+    assignment_status: str
+    identity_type: str
+    assignment_unit_type: str
+    assignment_unit_id: str
+    assignment_algorithm_version: str = "1.0"
+    assignment_salt_version: str = "v1"
+    configuration_hash: str
+    created_at: datetime
+
+
+class CaseAssignmentLink(BaseModel):
+    link_id: str
+    case_id: str
+    experiment_id: str
+    experiment_version: str
+    merchant_id: str
+    binding_id: str
+    assignment_id: str
+    assignment_arm: str
+    assignment_status: str
+    created_at: datetime

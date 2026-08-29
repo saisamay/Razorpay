@@ -234,6 +234,7 @@ def process_p1_pipeline(
 ) -> tuple[RecoveryGenome, DecisionProposal, ShadowEvaluation]:
     """Run full Stage 2 P1 Pipeline: P0-A..E -> Incident -> Compliance -> Genome -> Candidates -> Counterfactual -> Optimizer -> Proposal -> Shadow."""
 
+    from .assignment import assign_experiment_case
     from .capability_matrix import generate_action_candidates
     from .compliance import evaluate_compliance_eligibility
     from .counterfactual import evaluate_counterfactual_candidates
@@ -243,6 +244,12 @@ def process_p1_pipeline(
     from .optimizer import optimize_recovery_decision
     from .schemas import DecisionProposal, RecoveryGenome, ShadowEvaluation
     from .shadow import create_shadow_evaluation
+
+    # F3 Experiment Assignment (Section 2: Assignment precedes downstream intelligence)
+    try:
+        assign_experiment_case(session, contract.case_id)
+    except Exception as err:
+        logger.warning(f"F3 Experiment Assignment fail-closed for case {contract.case_id}: {err}")
 
     manifest, diag, fdna, temporal = process_failure_fingerprint(
         session, contract, timeline_events=timeline_events, reconciliation_evidence=reconciliation_evidence, worker_id=worker_id

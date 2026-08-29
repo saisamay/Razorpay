@@ -216,3 +216,149 @@ class OutcomeAttributionRecord(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ExperimentDesignRecord(Base):
+    """Immutable ExperimentDesign persistence model for F2 Experiment Governance."""
+
+    __tablename__ = "experiment_designs"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "experiment_version", name="uq_exp_id_version"),
+        Index("ix_exp_designs_status_population", "status", "population_definition"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+
+    control_arm_definition: Mapped[str] = mapped_column(String(64), nullable=False, default="PASSIVE_NO_ACTION")
+    treatment_arm_definition: Mapped[str] = mapped_column(String(64), nullable=False, default="STAGE2_DECISION_PROPOSAL")
+
+    primary_metric: Mapped[str] = mapped_column(String(64), nullable=False, default="VERIFIED_INCREMENTAL_RECOVERED_REVENUE")
+    secondary_metrics: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    population_definition: Mapped[str] = mapped_column(String(64), nullable=False, default="ALL_ELIGIBLE_FAILED_RECOVERY_CASES")
+    population_start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    population_end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    single_active_experiment_constraint: Mapped[bool] = mapped_column(nullable=False, default=True)
+
+    assignment_identity_strategy: Mapped[str] = mapped_column(String(64), nullable=False, default="MERCHANT_SCOPED_PAYMENT_STABLE")
+    assignment_salt_version: Mapped[str] = mapped_column(String(16), nullable=False, default="v1")
+    allocation_ratio: Mapped[float] = mapped_column(nullable=False, default=0.50)
+
+    baseline_assumption_source: Mapped[str] = mapped_column(String(64), nullable=False, default="HISTORICAL_BASELINE_INSUFFICIENT")
+    baseline_recovery_rate: Mapped[str] = mapped_column(String(32), nullable=False, default="UNAVAILABLE")
+    minimum_detectable_effect: Mapped[str] = mapped_column(String(32), nullable=False, default="UNAVAILABLE")
+    required_sample_size: Mapped[str] = mapped_column(String(32), nullable=False, default="UNAVAILABLE")
+    significance_level: Mapped[float] = mapped_column(nullable=False, default=0.05)
+    statistical_power: Mapped[float] = mapped_column(nullable=False, default=0.80)
+
+    attribution_window_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=72)
+    efficacy_stopping_rule: Mapped[str] = mapped_column(String(64), nullable=False, default="PRE_REGISTERED_ANALYSIS_POINT_ONLY")
+    safety_stopping_rules: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT", index=True)
+    approved_configuration_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ExperimentApprovalRecord(Base):
+    """Append-only audit trail of human governance approvals and rejections for experiments."""
+
+    __tablename__ = "experiment_approvals"
+
+    approval_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False, index=True)  # APPROVED or REJECTED
+    principal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class IdentityBindingRecord(Base):
+    """Source of truth identity binding for F3 Experiment Assignment (v1.6)."""
+
+    __tablename__ = "identity_bindings"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "experiment_version", "merchant_id", "identity_type", "resolved_identity_source_key", name="uq_binding_lookup"),
+        Index("ix_identity_bindings_merchant_fingerprint", "merchant_id", "identity_type", "identity_fingerprint"),
+    )
+
+    binding_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    identity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    resolved_identity_source_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    identity_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    resolver_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+    assignment_unit_type: Mapped[str] = mapped_column(String(32), nullable=False, default="PAYMENT")
+    assignment_unit_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class IdentityQuarantineRecord(Base):
+    """Identity quarantine record for unresolved identity conflicts (I-019)."""
+
+    __tablename__ = "identity_quarantines"
+    __table_args__ = (
+        UniqueConstraint("merchant_id", "identity_type", "identity_fingerprint", name="uq_quarantine_target"),
+    )
+
+    quarantine_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    identity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    identity_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    conflict_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE_CONFLICT")  # ACTIVE_CONFLICT, QUARANTINED, RECONCILED
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+
+class ExperimentAssignmentRecord(Base):
+    """Immutable ExperimentAssignment record derived from IdentityBinding (F3)."""
+
+    __tablename__ = "experiment_assignments"
+    __table_args__ = (
+        UniqueConstraint("binding_id", name="uq_assignment_binding"),
+    )
+
+    assignment_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    binding_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    assignment_arm: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # CONTROL, TREATMENT, UNASSIGNED, EXCLUDED, TERMINAL_FAILURE
+    assignment_status: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    assignment_algorithm_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+    assignment_salt_version: Mapped[str] = mapped_column(String(16), nullable=False, default="v1")
+    configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class CaseAssignmentLinkRecord(Base):
+    """Immutable link connecting RecoveryCase to its authoritative ExperimentAssignment (F3)."""
+
+    __tablename__ = "case_assignment_links"
+    __table_args__ = (
+        UniqueConstraint("case_id", "experiment_id", "experiment_version", name="uq_case_exp_link"),
+    )
+
+    link_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    binding_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    assignment_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    assignment_arm: Mapped[str] = mapped_column(String(32), nullable=False)
+    assignment_status: Mapped[str] = mapped_column(String(48), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
