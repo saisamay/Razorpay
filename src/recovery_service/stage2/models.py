@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..database import Base
@@ -224,6 +224,7 @@ class ExperimentDesignRecord(Base):
     __tablename__ = "experiment_designs"
     __table_args__ = (
         UniqueConstraint("experiment_id", "experiment_version", name="uq_exp_id_version"),
+        CheckConstraint("allocation_ratio >= 0.0 AND allocation_ratio <= 1.0", name="ck_allocation_ratio_range"),
         Index("ix_exp_designs_status_population", "status", "population_definition"),
     )
 

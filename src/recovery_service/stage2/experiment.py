@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import ExperimentApprovalRecord, ExperimentDesignRecord
+
+
+def validate_allocation_ratio(allocation_ratio: Any) -> float:
+    """Validate allocation_ratio is a finite float between 0.0 and 1.0 inclusive (I-005)."""
+    if allocation_ratio is None or isinstance(allocation_ratio, bool) or not isinstance(allocation_ratio, (int, float)):
+        raise ValueError(f"Invalid allocation_ratio {allocation_ratio}: Must be a numeric float")
+    val = float(allocation_ratio)
+    if math.isnan(val) or math.isinf(val) or not (0.0 <= val <= 1.0):
+        raise ValueError(f"Invalid allocation_ratio {allocation_ratio}: Must be a finite float between 0.0 and 1.0 inclusive")
+    return val
 
 
 def utc_now() -> datetime:
@@ -42,7 +53,12 @@ class ExperimentDesign(BaseModel):
 
     assignment_identity_strategy: str = "MERCHANT_SCOPED_PAYMENT_STABLE"
     assignment_salt_version: str = "v1"
-    allocation_ratio: float = 0.50
+    allocation_ratio: float = Field(default=0.50, ge=0.0, le=1.0)
+
+    @field_validator("allocation_ratio")
+    @classmethod
+    def check_allocation_ratio_finite(cls, v: float) -> float:
+        return validate_allocation_ratio(v)
 
     baseline_assumption_source: str = "HISTORICAL_BASELINE_INSUFFICIENT"
     baseline_recovery_rate: str = "UNAVAILABLE"
@@ -70,6 +86,16 @@ class ExperimentDesign(BaseModel):
     rejection_reason: str | None = None
 
 
+def _iso_dt(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{dt.microsecond:06d}+00:00"
+
+
 def compute_configuration_hash(exp: ExperimentDesign) -> str:
     """Compute SHA-256 hash of immutable experiment configuration fields including salt version."""
     payload = {
@@ -80,8 +106,8 @@ def compute_configuration_hash(exp: ExperimentDesign) -> str:
         "primary_metric": exp.primary_metric,
         "secondary_metrics": sorted(exp.secondary_metrics),
         "population_definition": exp.population_definition,
-        "population_start_time": exp.population_start_time.isoformat(),
-        "population_end_time": exp.population_end_time.isoformat() if exp.population_end_time else None,
+        "population_start_time": _iso_dt(exp.population_start_time),
+        "population_end_time": _iso_dt(exp.population_end_time),
         "assignment_identity_strategy": exp.assignment_identity_strategy,
         "assignment_salt_version": exp.assignment_salt_version,
         "allocation_ratio": exp.allocation_ratio,
@@ -99,6 +125,50 @@ def compute_configuration_hash(exp: ExperimentDesign) -> str:
     return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def experiment_design_from_record(rec: ExperimentDesignRecord) -> ExperimentDesign:
+    """Reconstruct ExperimentDesign Pydantic DTO from DB record for live hash validation."""
+    return ExperimentDesign(
+        experiment_id=rec.experiment_id,
+        experiment_version=rec.experiment_version,
+        control_arm_definition=rec.control_arm_definition,
+        treatment_arm_definition=rec.treatment_arm_definition,
+        primary_metric=rec.primary_metric,
+        secondary_metrics=rec.secondary_metrics or [],
+        population_definition=rec.population_definition,
+        population_start_time=_ensure_utc(rec.population_start_time),
+        population_end_time=_ensure_utc(rec.population_end_time),
+        single_active_experiment_constraint=rec.single_active_experiment_constraint,
+        assignment_identity_strategy=rec.assignment_identity_strategy,
+        assignment_salt_version=rec.assignment_salt_version,
+        allocation_ratio=rec.allocation_ratio,
+        baseline_assumption_source=rec.baseline_assumption_source,
+        baseline_recovery_rate=rec.baseline_recovery_rate,
+        minimum_detectable_effect=rec.minimum_detectable_effect,
+        required_sample_size=rec.required_sample_size,
+        significance_level=rec.significance_level,
+        statistical_power=rec.statistical_power,
+        attribution_window_hours=rec.attribution_window_hours,
+        efficacy_stopping_rule=rec.efficacy_stopping_rule,
+        safety_stopping_rules=rec.safety_stopping_rules or {},
+        status=rec.status,
+        approved_configuration_hash=rec.approved_configuration_hash,
+        created_at=_ensure_utc(rec.created_at),
+        approved_at=_ensure_utc(rec.approved_at),
+        approved_by=rec.approved_by,
+        rejected_at=_ensure_utc(rec.rejected_at),
+        rejected_by=rec.rejected_by,
+        rejection_reason=rec.rejection_reason,
+    )
+
+
 def create_experiment_design(
     session: Session,
     experiment_id: str,
@@ -108,6 +178,7 @@ def create_experiment_design(
     population_start_time: datetime | None = None,
 ) -> ExperimentDesignRecord:
     """Create a new DRAFT experiment design."""
+    validated_ratio = validate_allocation_ratio(allocation_ratio)
     now = utc_now()
     start_t = population_start_time or now
     pk_id = f"{experiment_id}:{experiment_version}"
@@ -116,12 +187,37 @@ def create_experiment_design(
     if existing:
         raise ValueError(f"ExperimentDesign {pk_id} already exists")
 
+    default_dto = ExperimentDesign(
+        experiment_id=experiment_id,
+        experiment_version=experiment_version,
+        allocation_ratio=validated_ratio,
+        population_start_time=start_t,
+        created_at=now,
+    )
     rec = ExperimentDesignRecord(
         id=pk_id,
         experiment_id=experiment_id,
         experiment_version=experiment_version,
-        allocation_ratio=allocation_ratio,
+        control_arm_definition=default_dto.control_arm_definition,
+        treatment_arm_definition=default_dto.treatment_arm_definition,
+        primary_metric=default_dto.primary_metric,
+        secondary_metrics=default_dto.secondary_metrics,
+        population_definition=default_dto.population_definition,
         population_start_time=start_t,
+        population_end_time=default_dto.population_end_time,
+        single_active_experiment_constraint=default_dto.single_active_experiment_constraint,
+        assignment_identity_strategy=default_dto.assignment_identity_strategy,
+        assignment_salt_version=default_dto.assignment_salt_version,
+        allocation_ratio=validated_ratio,
+        baseline_assumption_source=default_dto.baseline_assumption_source,
+        baseline_recovery_rate=default_dto.baseline_recovery_rate,
+        minimum_detectable_effect=default_dto.minimum_detectable_effect,
+        required_sample_size=default_dto.required_sample_size,
+        significance_level=default_dto.significance_level,
+        statistical_power=default_dto.statistical_power,
+        attribution_window_hours=default_dto.attribution_window_hours,
+        efficacy_stopping_rule=default_dto.efficacy_stopping_rule,
+        safety_stopping_rules=default_dto.safety_stopping_rules,
         status="DRAFT",
         created_at=now,
     )
@@ -139,33 +235,10 @@ def freeze_experiment_design(session: Session, experiment_id: str, experiment_ve
     if rec.status != "DRAFT":
         raise ValueError(f"Cannot freeze experiment in status {rec.status}")
 
-    # Compute hash
-    dto = ExperimentDesign(
-        experiment_id=rec.experiment_id,
-        experiment_version=rec.experiment_version,
-        control_arm_definition=rec.control_arm_definition,
-        treatment_arm_definition=rec.treatment_arm_definition,
-        primary_metric=rec.primary_metric,
-        secondary_metrics=rec.secondary_metrics,
-        population_definition=rec.population_definition,
-        population_start_time=rec.population_start_time,
-        population_end_time=rec.population_end_time,
-        assignment_identity_strategy=rec.assignment_identity_strategy,
-        assignment_salt_version=rec.assignment_salt_version,
-        allocation_ratio=rec.allocation_ratio,
-        baseline_assumption_source=rec.baseline_assumption_source,
-        baseline_recovery_rate=rec.baseline_recovery_rate,
-        minimum_detectable_effect=rec.minimum_detectable_effect,
-        required_sample_size=rec.required_sample_size,
-        significance_level=rec.significance_level,
-        statistical_power=rec.statistical_power,
-        attribution_window_hours=rec.attribution_window_hours,
-        efficacy_stopping_rule=rec.efficacy_stopping_rule,
-        safety_stopping_rules=rec.safety_stopping_rules,
-        status="FROZEN",
-        created_at=rec.created_at,
-    )
+    validate_allocation_ratio(rec.allocation_ratio)
 
+    rec.status = "FROZEN"
+    dto = experiment_design_from_record(rec)
     rec.approved_configuration_hash = compute_configuration_hash(dto)
     rec.status = "FROZEN"
     session.flush()
@@ -281,6 +354,7 @@ def activate_experiment_running(session: Session, experiment_id: str, experiment
 
     now = utc_now()
     rec.status = "RUNNING"
-    rec.population_start_time = now  # Section 11: Bind population_start_time to RUNNING activation timestamp
+    if rec.population_start_time is None:
+        rec.population_start_time = now
     session.flush()
     return rec

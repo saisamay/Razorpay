@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models import RecoveryCase
-from .experiment import compute_configuration_hash
+from .experiment import compute_configuration_hash, experiment_design_from_record
 from .models import (
     CaseAssignmentLinkRecord,
     ExperimentAssignmentRecord,
@@ -26,7 +28,22 @@ logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "v1"
 ASSIGNMENT_ALGORITHM_VERSION = "1.0"
-DEFAULT_ASSIGNMENT_SALT = "default_secret_assignment_salt_v1"
+
+
+def resolve_production_secret_salt() -> str | None:
+    """Authoritative secret salt resolver for F3 experiment assignment.
+    
+    Returns secret salt strictly from environment variable ASSIGNMENT_SECRET_SALT.
+    Returns None if absent, empty, whitespace-only, or invalid type.
+    NO fallback to DEFAULT_ASSIGNMENT_SALT or hardcoded secret is permitted.
+    """
+    try:
+        val = os.environ.get("ASSIGNMENT_SECRET_SALT")
+        if not val or not isinstance(val, str) or not val.strip():
+            return None
+        return val.strip()
+    except Exception:
+        return None
 
 
 def utc_now() -> datetime:
@@ -79,8 +96,7 @@ def compute_hmac_assignment_bucket(secret_salt: str, canonical_bytes: bytes) -> 
     """Pure HMAC-SHA256 assignment bucket algorithm (v1.6 Section 17 & I-001)."""
     digest_hex = hmac.new(secret_salt.encode("utf-8"), canonical_bytes, hashlib.sha256).hexdigest()
     digest_int = int(digest_hex, 16)
-    max_uint = (1 << 256) - 1
-    bucket = digest_int / max_uint
+    bucket = (digest_int >> 203) / (1 << 53)
     return bucket, digest_hex
 
 
@@ -122,13 +138,19 @@ def assign_experiment_case(
     case_id: str,
     *,
     experiment_id: str | None = None,
-    secret_salt: str = DEFAULT_ASSIGNMENT_SALT,
+    secret_salt: str | None = None,
 ) -> tuple[ExperimentAssignmentResult | None, CaseAssignmentLinkRecord | None]:
     """Execute F3 Controlled Experiment Assignment for a RecoveryCase.
 
     Strictly satisfies Invariants I-001 through I-026.
     """
     now = utc_now()
+    try:
+        resolved_salt = secret_salt if secret_salt is not None else resolve_production_secret_salt()
+    except Exception as exc:
+        logger.warning(f"Secret salt resolution exception for case {case_id}: {exc}")
+        resolved_salt = None
+
     case = session.get(RecoveryCase, case_id, with_for_update=True)
     if case is None:
         raise ValueError(f"RecoveryCase {case_id} not found")
@@ -156,6 +178,13 @@ def assign_experiment_case(
     # Gate 1: Check Experiment State (I-010, Section 7)
     if exp_rec is None or exp_rec.status != "RUNNING":
         return None, None
+
+    # Secret Salt Fail-Closed Safety Check (I-005, Section 18)
+    if not isinstance(resolved_salt, str) or not resolved_salt.strip():
+        logger.warning(f"Secret salt missing or invalid for case {case_id}")
+        return _record_unassigned_link(
+            session, case, exp_rec, "UNASSIGNED", "INFRASTRUCTURE_FAILURE", now
+        )
 
     # Gate 2: Check Existing Immutable Case Assignment Link (I-003, Section 22)
     existing_link = session.scalars(
@@ -206,8 +235,25 @@ def assign_experiment_case(
         )
 
     # Gate 4: Verify Approved Configuration Hash Integrity (Section 15, I-010)
-    current_hash = exp_rec.approved_configuration_hash
-    if not current_hash:
+    if not exp_rec.approved_configuration_hash:
+        return _record_unassigned_link(
+            session, case, exp_rec, "UNASSIGNED", "UNASSIGNED_STALE_CONFIGURATION", now
+        )
+
+    try:
+        current_dto = experiment_design_from_record(exp_rec)
+        recomputed_hash = compute_configuration_hash(current_dto)
+    except Exception as exc:
+        logger.warning(f"Failed to reconstruct or compute configuration hash for experiment {exp_rec.experiment_id}: {exc}")
+        return _record_unassigned_link(
+            session, case, exp_rec, "UNASSIGNED", "UNASSIGNED_STALE_CONFIGURATION", now
+        )
+
+    if recomputed_hash != exp_rec.approved_configuration_hash:
+        logger.warning(
+            f"Stale/mutated configuration hash for experiment {exp_rec.experiment_id}: "
+            f"recomputed={recomputed_hash}, approved={exp_rec.approved_configuration_hash}"
+        )
         return _record_unassigned_link(
             session, case, exp_rec, "UNASSIGNED", "UNASSIGNED_STALE_CONFIGURATION", now
         )
@@ -231,11 +277,21 @@ def assign_experiment_case(
             session, case, exp_rec, "EXCLUDED", "QUARANTINED", now
         )
 
-    # Gate 6: IdentityBinding Source of Truth (Section 5 & 18, I-002, I-013, I-021)
-    binding_id = f"bind_{hashlib.sha256(f'{exp_rec.experiment_id}:{exp_rec.experiment_version}:{merchant_id}:{id_type}:{source_key}'.encode()).hexdigest()[:32]}"
+    # Gate 6: Authoritative 5-Column IdentityBinding Lookup (I-002, I-013, I-021)
+    binding = session.scalars(
+        select(IdentityBindingRecord)
+        .where(
+            IdentityBindingRecord.experiment_id == exp_rec.experiment_id,
+            IdentityBindingRecord.experiment_version == exp_rec.experiment_version,
+            IdentityBindingRecord.merchant_id == merchant_id,
+            IdentityBindingRecord.identity_type == id_type,
+            IdentityBindingRecord.resolved_identity_source_key == source_key,
+        )
+        .with_for_update()
+    ).first()
 
-    binding = session.get(IdentityBindingRecord, binding_id, with_for_update=True)
     if binding is None:
+        binding_id = f"bind_{uuid.uuid4().hex}"
         try:
             with session.begin_nested():
                 new_binding = IdentityBindingRecord(
@@ -255,13 +311,26 @@ def assign_experiment_case(
                 session.flush()
                 binding = new_binding
         except IntegrityError:
-            # Race condition! Winning worker already created binding. Reload winning binding (I-021).
-            binding = session.get(IdentityBindingRecord, binding_id, with_for_update=True)
+            # Race condition! Winning worker created binding concurrently under uq_binding_lookup.
+            # Reload winning binding using 5-column composite lookup key.
+            binding = session.scalars(
+                select(IdentityBindingRecord)
+                .where(
+                    IdentityBindingRecord.experiment_id == exp_rec.experiment_id,
+                    IdentityBindingRecord.experiment_version == exp_rec.experiment_version,
+                    IdentityBindingRecord.merchant_id == merchant_id,
+                    IdentityBindingRecord.identity_type == id_type,
+                    IdentityBindingRecord.resolved_identity_source_key == source_key,
+                )
+                .with_for_update()
+            ).first()
 
     if binding is None:
         return _record_unassigned_link(
             session, case, exp_rec, "UNASSIGNED", "INFRASTRUCTURE_FAILURE", now
         )
+
+    binding_id = binding.binding_id
 
     # Gate 7: Pure HMAC Assignment Derivation (Section 17, I-001)
     canonical_bytes = canonical_encode_input(
@@ -275,7 +344,7 @@ def assign_experiment_case(
         ASSIGNMENT_ALGORITHM_VERSION,
     )
 
-    bucket, _ = compute_hmac_assignment_bucket(secret_salt, canonical_bytes)
+    bucket, _ = compute_hmac_assignment_bucket(resolved_salt, canonical_bytes)
     assigned_arm = "TREATMENT" if bucket < exp_rec.allocation_ratio else "CONTROL"
     assigned_status = f"ASSIGNED_{assigned_arm}"
 
@@ -312,7 +381,7 @@ def assign_experiment_case(
                     assignment_status=assigned_status,
                     assignment_algorithm_version=ASSIGNMENT_ALGORITHM_VERSION,
                     assignment_salt_version=exp_rec.assignment_salt_version,
-                    configuration_hash=current_hash,
+                    configuration_hash=exp_rec.approved_configuration_hash,
                     created_at=now,
                 )
                 session.add(new_asgn)
@@ -357,7 +426,7 @@ def assign_experiment_case(
         assignment_unit_id=source_key,
         assignment_algorithm_version=ASSIGNMENT_ALGORITHM_VERSION,
         assignment_salt_version=exp_rec.assignment_salt_version,
-        configuration_hash=current_hash,
+        configuration_hash=exp_rec.approved_configuration_hash,
         created_at=now,
     )
 
