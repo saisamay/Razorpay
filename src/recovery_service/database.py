@@ -28,6 +28,8 @@ def ensure_schema(session_factory: sessionmaker[Session]) -> None:
     # Register all mapped tables when this function is called by maintenance code
     # that imported database.py directly rather than the application entry point.
     from . import models as _models  # noqa: F401
+    from .stage2 import models as _stage2_models  # noqa: F401
+    from .stage3 import models as _stage3_models  # noqa: F401
 
     engine = session_factory.kw["bind"]
     inspector = inspect(engine)

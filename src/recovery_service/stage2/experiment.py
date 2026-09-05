@@ -6,11 +6,19 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
+from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import ExperimentApprovalRecord, ExperimentDesignRecord
+
+
+class RandomizationDesign(str, Enum):
+    """Authoritative randomization design enum for experiment inference."""
+
+    BERNOULLI = "BERNOULLI"
+    COMPLETE_RANDOMIZATION = "COMPLETE_RANDOMIZATION"
 
 
 def validate_allocation_ratio(allocation_ratio: Any) -> float:
@@ -54,6 +62,7 @@ class ExperimentDesign(BaseModel):
     assignment_identity_strategy: str = "MERCHANT_SCOPED_PAYMENT_STABLE"
     assignment_salt_version: str = "v1"
     allocation_ratio: float = Field(default=0.50, ge=0.0, le=1.0)
+    randomization_design: str = RandomizationDesign.BERNOULLI.value
 
     @field_validator("allocation_ratio")
     @classmethod
@@ -97,7 +106,7 @@ def _iso_dt(dt: datetime | None) -> str | None:
 
 
 def compute_configuration_hash(exp: ExperimentDesign) -> str:
-    """Compute SHA-256 hash of immutable experiment configuration fields including salt version."""
+    """Compute SHA-256 hash of immutable experiment configuration fields including salt version and randomization design."""
     payload = {
         "experiment_id": exp.experiment_id,
         "experiment_version": exp.experiment_version,
@@ -111,6 +120,7 @@ def compute_configuration_hash(exp: ExperimentDesign) -> str:
         "assignment_identity_strategy": exp.assignment_identity_strategy,
         "assignment_salt_version": exp.assignment_salt_version,
         "allocation_ratio": exp.allocation_ratio,
+        "randomization_design": exp.randomization_design,
         "baseline_assumption_source": exp.baseline_assumption_source,
         "baseline_recovery_rate": exp.baseline_recovery_rate,
         "minimum_detectable_effect": exp.minimum_detectable_effect,
@@ -149,6 +159,7 @@ def experiment_design_from_record(rec: ExperimentDesignRecord) -> ExperimentDesi
         assignment_identity_strategy=rec.assignment_identity_strategy,
         assignment_salt_version=rec.assignment_salt_version,
         allocation_ratio=rec.allocation_ratio,
+        randomization_design=getattr(rec, "randomization_design", RandomizationDesign.BERNOULLI.value) or RandomizationDesign.BERNOULLI.value,
         baseline_assumption_source=rec.baseline_assumption_source,
         baseline_recovery_rate=rec.baseline_recovery_rate,
         minimum_detectable_effect=rec.minimum_detectable_effect,

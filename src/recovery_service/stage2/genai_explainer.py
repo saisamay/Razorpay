@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
@@ -85,9 +86,7 @@ def generate_genai_explanation(
 
     Degrades gracefully if GenAI service is unavailable or OPENAI_API_KEY is not set.
     """
-    from ..settings import Settings
-
-    effective_key = api_key or Settings.from_environment().openai_api_key
+    effective_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
     sanitized = sanitize_genai_payload(genome)
 
     action = proposal.selected_action

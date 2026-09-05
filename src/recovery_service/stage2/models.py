@@ -246,6 +246,7 @@ class ExperimentDesignRecord(Base):
     assignment_identity_strategy: Mapped[str] = mapped_column(String(64), nullable=False, default="MERCHANT_SCOPED_PAYMENT_STABLE")
     assignment_salt_version: Mapped[str] = mapped_column(String(16), nullable=False, default="v1")
     allocation_ratio: Mapped[float] = mapped_column(nullable=False, default=0.50)
+    randomization_design: Mapped[str] = mapped_column(String(32), nullable=False, default="BERNOULLI")
 
     baseline_assumption_source: Mapped[str] = mapped_column(String(64), nullable=False, default="HISTORICAL_BASELINE_INSUFFICIENT")
     baseline_recovery_rate: Mapped[str] = mapped_column(String(32), nullable=False, default="UNAVAILABLE")
@@ -362,4 +363,213 @@ class CaseAssignmentLinkRecord(Base):
     assignment_id: Mapped[str] = mapped_column(String(80), nullable=False)
     assignment_arm: Mapped[str] = mapped_column(String(32), nullable=False)
     assignment_status: Mapped[str] = mapped_column(String(48), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class DecisionPolicyRecord(Base):
+    """Immutable/Versioned F5 Decision Policy persistence model (F5-2)."""
+
+    __tablename__ = "f5_decision_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "merchant_id",
+            "experiment_id",
+            "experiment_version",
+            "approved_configuration_hash",
+            "policy_version",
+            name="uq_f5_policy_binding",
+        ),
+        Index("ix_f5_policy_lookup", "merchant_id", "experiment_id", "experiment_version", "status"),
+        Index("ix_f5_policy_f4_evidence", "source_f4_evidence_id"),
+    )
+
+    policy_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    policy_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    approved_configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    treatment_arm_definition: Mapped[str] = mapped_column(String(64), nullable=False, default="STAGE2_DECISION_PROPOSAL")
+
+    source_f4_evidence_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    source_f4_evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_f4_status: Mapped[str] = mapped_column(String(48), nullable=False)
+    source_f4_configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_f4_point_estimate: Mapped[float | None] = mapped_column(nullable=True)
+    source_f4_confidence_interval_lower: Mapped[float | None] = mapped_column(nullable=True)
+    source_f4_confidence_interval_upper: Mapped[float | None] = mapped_column(nullable=True)
+    statistical_limitations: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    authorized_actions: Mapped[list] = mapped_column(JSON, nullable=False)
+    baseline_action: Mapped[str] = mapped_column(String(48), nullable=False, default="STOP")
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT", index=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    supersession_status: Mapped[str] = mapped_column(String(32), nullable=False, default="CURRENT")
+    superseding_f4_evidence_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class PolicyEnforcementLogRecord(Base):
+    """Append-only audit record of F5 policy enforcement decisions (F5-2)."""
+
+    __tablename__ = "f5_policy_enforcement_logs"
+    __table_args__ = (
+        Index("ix_f5_enforcement_case", "case_id"),
+        Index("ix_f5_enforcement_merchant_exp", "merchant_id", "experiment_id", "experiment_version"),
+        Index("ix_f5_enforcement_policy", "policy_id"),
+        Index("ix_f5_enforcement_proposal", "proposal_id"),
+        UniqueConstraint("proposal_id", name="uq_f5_enforcement_proposal"),
+    )
+
+    enforcement_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    case_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    policy_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    policy_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source_f4_evidence_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    stage2_proposed_action: Mapped[str] = mapped_column(String(48), nullable=False)
+    executed_action: Mapped[str] = mapped_column(String(48), nullable=False)
+    baseline_action: Mapped[str] = mapped_column(String(48), nullable=False, default="STOP")
+
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class PolicyKillAuditRecord(Base):
+    """Append-only audit record of F5 emergency kill switch operations (F5-5)."""
+
+    __tablename__ = "f5_policy_kill_audits"
+    __table_args__ = (
+        Index("ix_f5_kill_audit_policy", "policy_id"),
+        Index("ix_f5_kill_audit_merchant", "merchant_id", "experiment_id", "experiment_version"),
+    )
+
+    audit_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    policy_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    approved_configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    policy_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+    previous_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    new_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    kill_effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    operator_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CaseKnowledgeRecord(Base):
+    """Bounded, tenant-isolated recovery knowledge record (Step 2.1).
+
+    Stores validated recovery outcome evidence linked to failure fingerprints.
+    Does NOT contain PII or payment credentials.
+    """
+
+    __tablename__ = "stage2_case_knowledge_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "merchant_id", "failure_fingerprint", "candidate_action", name="uq_knowledge_merchant_fp_action"
+        ),
+        Index("ix_knowledge_lookup", "merchant_id", "failure_fingerprint"),
+        Index("ix_knowledge_diagnosis", "merchant_id", "diagnosis_class"),
+    )
+
+    knowledge_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    failure_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    diagnosis_class: Mapped[str] = mapped_column(String(64), nullable=False)
+    rail: Mapped[str] = mapped_column(String(32), nullable=False, default="card")
+    candidate_action: Mapped[str] = mapped_column(String(48), nullable=False)
+
+    experiment_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    experiment_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    source_f4_evidence_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source_f4_status: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    source_f4_is_causal: Mapped[bool] = mapped_column(nullable=False, default=False)
+    source_f4_point_estimate: Mapped[float | None] = mapped_column(nullable=True)
+    source_f4_confidence_interval: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    total_observations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    successful_recoveries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_net_recovered_amount: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    observed_success_rate: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    confidence_score: Mapped[float] = mapped_column(nullable=False, default=0.0)
+
+    last_stage3_attribution_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    schema_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeIngestionLogRecord(Base):
+    """Idempotency log tracking ingested Stage3 Outcome Observations (Step 2.1)."""
+
+    __tablename__ = "stage2_knowledge_ingestion_logs"
+    __table_args__ = (
+        UniqueConstraint("attribution_id", name="uq_knowledge_ingestion_attribution"),
+        Index("ix_knowledge_ingestion_merchant", "merchant_id"),
+    )
+
+    ingestion_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    attribution_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    case_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    knowledge_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class F4EvaluationReportRecord(Base):
+    """Durable persistence for Stage 2 F4 Causal Evaluation Reports."""
+
+    __tablename__ = "stage2_f4_evaluation_reports"
+    __table_args__ = (
+        UniqueConstraint("merchant_id", "experiment_id", "experiment_version", name="uq_f4_report_merchant_exp_ver"),
+        Index("ix_f4_report_merchant_exp", "merchant_id", "experiment_id", "experiment_version"),
+    )
+
+    report_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    merchant_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    experiment_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+
+    status: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    estimand_population: Mapped[str] = mapped_column(String(64), nullable=False)
+    allocation_proportion_p: Mapped[float] = mapped_column(nullable=False)
+
+    eligible_population_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_control_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_treatment_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    point_estimate_paise_per_unit: Mapped[float | None] = mapped_column(nullable=True)
+    incremental_recovered_revenue_paise: Mapped[int | None] = mapped_column(nullable=True)
+    counterfactual_control_revenue_paise: Mapped[int | None] = mapped_column(nullable=True)
+
+    standard_error: Mapped[float | None] = mapped_column(nullable=True)
+    confidence_interval_lower: Mapped[float | None] = mapped_column(nullable=True)
+    confidence_interval_upper: Mapped[float | None] = mapped_column(nullable=True)
+
+    invalidation_reasons: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    raw_report_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)

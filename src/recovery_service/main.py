@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -21,6 +22,8 @@ from .stage2.api import stage2_router
 from .stage2.dashboard import dashboard_router
 from .stage2.eval_api import eval_router
 from .stage2.exp_api import exp_router
+from .stage2.f5_api import f5_router
+from .stage3.escalation_api import escalation_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -79,10 +82,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Razorpay Revenue Recovery", version="2.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(stage2_router)
 app.include_router(eval_router)
 app.include_router(dashboard_router)
 app.include_router(exp_router)
+app.include_router(f5_router)
+app.include_router(escalation_router)
+
 
 
 @app.get("/health/live")

@@ -7,22 +7,142 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from sqlalchemy import select
 
 from ..models import PaymentState, RecoveryCase
+from ..revenue_economics import RevenueSummary, compute_revenue_summary
 from .evaluation import CaseEvaluationProjection, DataQualityStatus, MetricValue, ValueSemantics, build_metric_value
 from .genai_explainer import generate_genai_explanation
 from .models import (
     DecisionProposalRecord,
     DiagnosisRecord,
     EvidenceManifestRecord,
+    F4EvaluationReportRecord,
     FailureFingerprintRecord,
     IncidentClusterRecord,
     RecoveryEligibilityRecord,
     RecoveryGenomeRecord,
     ShadowEvaluationRecord,
 )
-from .schemas import DecisionProposal, P0GenomeSource, P1GenomeSource, RecoveryGenome
+from .ai_reasoner import generate_ai_reasoning
+from .schemas import CaseAIReasoningProjection, DecisionProposal, P0GenomeSource, P1GenomeSource, RecoveryGenome
 
 
 eval_router = APIRouter(prefix="/api/v2/evaluation", tags=["Stage 2 Evaluation API"])
+
+
+
+@eval_router.get("/revenue-summary", response_model=RevenueSummary)
+def get_revenue_summary(
+    request: Request,
+    merchant_id: str | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+    x_merchant_id: str | None = Header(default=None),
+) -> RevenueSummary:
+    """Deterministic Revenue Economics summary endpoint.
+
+    Enforces strict tenant boundary isolation if X-Merchant-Id header is provided.
+    Raises HTTP 403 Forbidden if X-Merchant-Id header conflicts with merchant_id query parameter.
+    """
+    if x_merchant_id and merchant_id and not hmac.compare_digest(x_merchant_id, merchant_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Authenticated tenant {x_merchant_id} cannot request metrics for merchant {merchant_id}",
+        )
+
+    effective_merchant_id = x_merchant_id or merchant_id
+    f4_report = getattr(request.app.state, "f4_report", None)
+
+    factory = request.app.state.sessions
+    with factory() as session:
+        return compute_revenue_summary(
+            session,
+            merchant_id=effective_merchant_id,
+            window_start=window_start,
+            window_end=window_end,
+            f4_report=f4_report,
+        )
+
+
+@eval_router.get("/f4-report")
+def get_f4_report(
+    request: Request,
+    merchant_id: str | None = None,
+    experiment_id: str | None = None,
+    experiment_version: str | None = None,
+    x_merchant_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Read-only exposure endpoint for persisted F4 Evaluation Reports (Gap 2).
+
+    Preserves exact persisted values without recalculating any causal estimators.
+    Enforces strict tenant boundary isolation.
+    """
+    if x_merchant_id and merchant_id and not hmac.compare_digest(x_merchant_id, merchant_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Authenticated tenant {x_merchant_id} cannot request F4 report for merchant {merchant_id}",
+        )
+
+    effective_merchant = x_merchant_id or merchant_id
+    if not effective_merchant:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Header 'x-merchant-id' or query parameter 'merchant_id' is required.",
+        )
+
+    factory = request.app.state.sessions
+    with factory() as session:
+        stmt = select(F4EvaluationReportRecord).where(F4EvaluationReportRecord.merchant_id == effective_merchant)
+        if experiment_id:
+            stmt = stmt.where(F4EvaluationReportRecord.experiment_id == experiment_id)
+        if experiment_version:
+            stmt = stmt.where(F4EvaluationReportRecord.experiment_version == experiment_version)
+
+        stmt = stmt.order_by(F4EvaluationReportRecord.evaluated_at.desc())
+        rec = session.scalars(stmt).first()
+
+        if rec is None:
+            return {
+                "status": "NOT_AVAILABLE",
+                "positivity_status": None,
+                "reason": "No persisted F4 evaluation report found for requested scope",
+                "merchant_id": effective_merchant,
+                "experiment_id": experiment_id,
+                "experiment_version": experiment_version,
+            }
+
+        positivity_status = None
+        if isinstance(rec.raw_report_json, dict):
+            positivity_status = rec.raw_report_json.get("positivity_status")
+
+        return {
+            "report_id": rec.report_id,
+            "merchant_id": rec.merchant_id,
+            "experiment_id": rec.experiment_id,
+            "experiment_version": rec.experiment_version,
+            "status": rec.status,
+            "estimand_population": rec.estimand_population,
+            "allocation_proportion_p": rec.allocation_proportion_p,
+            "eligible_population_count": rec.eligible_population_count,
+            "observed_control_count": rec.observed_control_count,
+            "observed_treatment_count": rec.observed_treatment_count,
+            "point_estimate_paise_per_unit": rec.point_estimate_paise_per_unit,
+            "incremental_recovered_revenue_paise": rec.incremental_recovered_revenue_paise,
+            "counterfactual_control_revenue_paise": rec.counterfactual_control_revenue_paise,
+            "standard_error": rec.standard_error,
+            "confidence_interval_lower": rec.confidence_interval_lower,
+            "confidence_interval_upper": rec.confidence_interval_upper,
+            "invalidation_reasons": rec.invalidation_reasons or [],
+            "positivity_status": positivity_status,
+            "raw_report_json": rec.raw_report_json,
+            "evaluated_at": rec.evaluated_at.isoformat() if rec.evaluated_at else None,
+            "created_at": rec.created_at.isoformat() if rec.created_at else None,
+        }
+
+
+
+
+
+
+
 
 
 def _verify_tenant_authorization(case: RecoveryCase, x_merchant_id: str | None) -> None:
@@ -38,8 +158,41 @@ def _verify_tenant_authorization(case: RecoveryCase, x_merchant_id: str | None) 
             )
 
 
+@eval_router.get("/cases/{case_id}/ai-reasoning", response_model=CaseAIReasoningProjection)
+def get_case_ai_reasoning(
+    case_id: str,
+    request: Request,
+    merchant_id: str | None = None,
+    x_merchant_id: str | None = Header(default=None),
+) -> CaseAIReasoningProjection:
+    """Non-authoritative Evidence-Grounded AI Recovery Forensic Copilot endpoint.
+
+    Enforces strict tenant boundary parameter consistency.
+    """
+    if x_merchant_id and merchant_id and not hmac.compare_digest(x_merchant_id, merchant_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Authenticated tenant {x_merchant_id} cannot request metrics for merchant {merchant_id}",
+        )
+
+    effective_merchant = x_merchant_id or merchant_id
+
+    factory = request.app.state.sessions
+    with factory() as session:
+        case = session.get(RecoveryCase, case_id)
+        if case is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"RecoveryCase {case_id} not found"
+            )
+
+        _verify_tenant_authorization(case, effective_merchant)
+
+        return generate_ai_reasoning(session, case_id, effective_merchant)
+
+
 @eval_router.get("/cases/{case_id}", response_model=CaseEvaluationProjection)
 def get_case_evaluation_projection(
+
     case_id: str,
     request: Request,
     x_merchant_id: str | None = Header(default=None),

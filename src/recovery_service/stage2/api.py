@@ -3,8 +3,8 @@ from __future__ import annotations
 import hmac
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
-from sqlalchemy import select
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from sqlalchemy import func, select
 
 from ..models import RecoveryCase
 from .consumer import process_diagnosis
@@ -31,6 +31,92 @@ def _require_admin_auth(request: Request, x_internal_token: str | None) -> None:
     if settings and settings.internal_api_token:
         if not x_internal_token or not hmac.compare_digest(x_internal_token, settings.internal_api_token):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized internal token")
+
+
+@stage2_router.get("/cases")
+def list_recovery_cases(
+    request: Request,
+    merchant_id: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
+    recovery_eligible: bool | None = None,
+    min_amount: int | None = None,
+    max_amount: int | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    x_merchant_id: str | None = Header(default=None),
+):
+    """Tenant-authorized paginated read-only endpoint for RecoveryCases (Gap 3).
+
+    Performs database-level SQL LIMIT/OFFSET pagination and server-side filtering.
+    """
+    if x_merchant_id and merchant_id and not hmac.compare_digest(x_merchant_id, merchant_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Authenticated tenant {x_merchant_id} cannot request cases for merchant {merchant_id}",
+        )
+
+    effective_merchant = x_merchant_id or merchant_id
+    if not effective_merchant:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Header 'x-merchant-id' or query parameter 'merchant_id' is required.",
+        )
+
+    factory = request.app.state.sessions
+    with factory() as session:
+        stmt = select(RecoveryCase).where(RecoveryCase.merchant_id == effective_merchant)
+        count_stmt = select(func.count(RecoveryCase.case_id)).where(RecoveryCase.merchant_id == effective_merchant)
+
+        if status_filter:
+            stmt = stmt.where(RecoveryCase.state == status_filter)
+            count_stmt = count_stmt.where(RecoveryCase.state == status_filter)
+
+        if recovery_eligible is not None:
+            stmt = stmt.where(RecoveryCase.recovery_eligible == recovery_eligible)
+            count_stmt = count_stmt.where(RecoveryCase.recovery_eligible == recovery_eligible)
+
+        if min_amount is not None:
+            stmt = stmt.where(RecoveryCase.amount >= min_amount)
+            count_stmt = count_stmt.where(RecoveryCase.amount >= min_amount)
+
+        if max_amount is not None:
+            stmt = stmt.where(RecoveryCase.amount <= max_amount)
+            count_stmt = count_stmt.where(RecoveryCase.amount <= max_amount)
+
+        total = session.scalar(count_stmt) or 0
+
+        stmt = (
+            stmt.order_by(RecoveryCase.first_seen_at.desc(), RecoveryCase.case_id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        cases = session.scalars(stmt).all()
+
+        return {
+            "items": [
+                {
+                    "case_id": c.case_id,
+                    "payment_id": c.payment_id,
+                    "recovery_episode_id": c.recovery_episode_id,
+                    "merchant_id": c.merchant_id,
+                    "order_id": c.order_id,
+                    "amount": c.amount,
+                    "currency": c.currency,
+                    "state": c.state,
+                    "state_confidence": c.state_confidence,
+                    "recovery_eligible": c.recovery_eligible,
+                    "eligibility_reason": c.eligibility_reason,
+                    "schema_version": c.schema_version,
+                    "stage1_state_version": c.stage1_state_version,
+                    "first_seen_at": c.first_seen_at.isoformat() if c.first_seen_at else None,
+                    "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
+                }
+                for c in cases
+            ],
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+        }
 
 
 @stage2_router.get("/cases/{case_id}/diagnosis")

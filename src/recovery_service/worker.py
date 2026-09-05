@@ -98,6 +98,74 @@ def _sweep_cases(factory, queue: EventQueue) -> list[str]:
     return cases
 
 
+def _sweep_stage3_observations(factory) -> None:
+    from .stage3.collector import sweep_unobserved_attributions
+
+    try:
+        sweep_unobserved_attributions(factory, limit=100)
+    except Exception:
+        structured_log(logger, "stage3_observation_sweep_failed")
+        logger.exception("Stage 3 observation sweep failed")
+
+
+def _sweep_stage3_optimizers(factory) -> None:
+    from .stage3.optimizer import submit_candidate_to_f5
+    from .stage3.repository import Stage3OptimizationCandidateRepository
+
+    try:
+        with factory() as session:
+            repo = Stage3OptimizationCandidateRepository()
+            pending_f4 = repo.list_pending_candidates(session, status="WAITING_FOR_F4", limit=50)
+            pending_f5 = repo.list_pending_candidates(session, status="WAITING_FOR_F5", limit=50)
+
+            for cand in pending_f4 + pending_f5:
+                try:
+                    submit_candidate_to_f5(session, cand.candidate_id, candidate_repository=repo)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+    except Exception:
+        structured_log(logger, "stage3_optimizer_sweep_failed")
+        logger.exception("Stage 3 optimizer sweep failed")
+
+
+def _sweep_stage3_orchestrations(factory, worker_id: str) -> None:
+    from .stage3.models import RecoveryOrchestrationRecord
+    from .stage3.orchestrator import advance_recovery_episode
+
+    try:
+        with factory() as session:
+            pending_cases = list(session.scalars(
+                select(RecoveryOrchestrationRecord.case_id).where(
+                    RecoveryOrchestrationRecord.episode_status == "PENDING"
+                ).limit(50)
+            ).all())
+
+        for case_id in pending_cases:
+            with factory() as session:
+                try:
+                    advance_recovery_episode(session, case_id, worker_id=worker_id)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    logger.exception("Failed to advance recovery episode for case %s", case_id)
+    except Exception:
+        structured_log(logger, "stage3_orchestration_sweep_failed")
+        logger.exception("Stage 3 orchestration sweep failed")
+
+
+def _sweep_escalation_slas(factory) -> None:
+    from .stage3.escalation import check_and_apply_sla_timeouts
+
+    try:
+        with factory() as session:
+            check_and_apply_sla_timeouts(session)
+            session.commit()
+    except Exception:
+        structured_log(logger, "escalation_sla_sweep_failed")
+        logger.exception("Escalation SLA sweep failed")
+
+
 def main() -> None:
     settings = Settings.from_environment()
     factory = build_session_factory(settings)
@@ -117,10 +185,15 @@ def main() -> None:
                                       queue.reclaim(RECONCILIATION_STREAM_NAME, RECONCILIATION_GROUP, worker_id, settings.redis_claim_idle_ms), worker_id)
 
         now = time.monotonic()
-        if now - last_housekeeping >= 5:
+        if now - last_housekeeping >= settings.stage3_sweep_interval_seconds:
             _sweep_pending(factory, worker_id)
             _sweep_cases(factory, queue)
+            _sweep_stage3_observations(factory)
+            _sweep_stage3_optimizers(factory)
+            _sweep_stage3_orchestrations(factory, worker_id)
+            _sweep_escalation_slas(factory)
             for payment_id in _sweep_timeouts(factory, settings.processing_timeout_seconds):
+
                 try:
                     queue.publish_reconciliation(payment_id)
                 except Exception:

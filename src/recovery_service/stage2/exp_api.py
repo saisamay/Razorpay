@@ -73,8 +73,34 @@ def _dto_from_record(rec: ExperimentDesignRecord) -> ExperimentDesign:
     )
 
 
+import hmac
+
+
+def _require_admin_auth(request: Request, x_internal_token: str | None) -> None:
+    settings = getattr(request.app.state, "settings", None)
+    expected = getattr(settings, "internal_api_token", None) if settings else None
+    if expected:
+        if not x_internal_token or not hmac.compare_digest(x_internal_token, expected):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: invalid or missing administrative internal token",
+            )
+    else:
+        env = getattr(settings, "environment", "production") if settings else "production"
+        if env not in {"test", "development", "local"}:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: administrative internal token is unconfigured",
+            )
+
+
 @exp_router.post("", response_model=ExperimentDesign, status_code=status.HTTP_201_CREATED)
-def create_experiment(req: CreateExperimentRequest, request: Request) -> ExperimentDesign:
+def create_experiment(
+    req: CreateExperimentRequest,
+    request: Request,
+    x_internal_token: str | None = Header(default=None),
+) -> ExperimentDesign:
+    _require_admin_auth(request, x_internal_token)
     factory = request.app.state.sessions
     with factory() as session:
         try:
@@ -91,7 +117,13 @@ def create_experiment(req: CreateExperimentRequest, request: Request) -> Experim
 
 
 @exp_router.post("/{experiment_id}/freeze", response_model=ExperimentDesign)
-def freeze_experiment(experiment_id: str, request: Request, version: str = "1.0") -> ExperimentDesign:
+def freeze_experiment(
+    experiment_id: str,
+    request: Request,
+    version: str = "1.0",
+    x_internal_token: str | None = Header(default=None),
+) -> ExperimentDesign:
+    _require_admin_auth(request, x_internal_token)
     factory = request.app.state.sessions
     with factory() as session:
         try:
@@ -103,7 +135,13 @@ def freeze_experiment(experiment_id: str, request: Request, version: str = "1.0"
 
 
 @exp_router.post("/{experiment_id}/ready", response_model=ExperimentDesign)
-def ready_experiment(experiment_id: str, request: Request, version: str = "1.0") -> ExperimentDesign:
+def ready_experiment(
+    experiment_id: str,
+    request: Request,
+    version: str = "1.0",
+    x_internal_token: str | None = Header(default=None),
+) -> ExperimentDesign:
+    _require_admin_auth(request, x_internal_token)
     factory = request.app.state.sessions
     with factory() as session:
         try:
@@ -120,7 +158,9 @@ def approve_experiment(
     req: ApproveExperimentRequest,
     request: Request,
     x_principal_id: str | None = Header(default=None),
+    x_internal_token: str | None = Header(default=None),
 ) -> ExperimentDesign:
+    _require_admin_auth(request, x_internal_token)
     if not x_principal_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing required x-principal-id header for human authorization")
 
@@ -146,7 +186,9 @@ def reject_experiment(
     req: RejectExperimentRequest,
     request: Request,
     x_principal_id: str | None = Header(default=None),
+    x_internal_token: str | None = Header(default=None),
 ) -> ExperimentDesign:
+    _require_admin_auth(request, x_internal_token)
     if not x_principal_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing required x-principal-id header")
 
@@ -167,7 +209,13 @@ def reject_experiment(
 
 
 @exp_router.post("/{experiment_id}/activate", response_model=ExperimentDesign)
-def activate_experiment(experiment_id: str, request: Request, version: str = "1.0") -> ExperimentDesign:
+def activate_experiment(
+    experiment_id: str,
+    request: Request,
+    version: str = "1.0",
+    x_internal_token: str | None = Header(default=None),
+) -> ExperimentDesign:
+    _require_admin_auth(request, x_internal_token)
     factory = request.app.state.sessions
     with factory() as session:
         try:
@@ -176,6 +224,7 @@ def activate_experiment(experiment_id: str, request: Request, version: str = "1.
             return _dto_from_record(rec)
         except ValueError as err:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(err))
+
 
 
 @exp_router.get("/{experiment_id}", response_model=ExperimentDesign)

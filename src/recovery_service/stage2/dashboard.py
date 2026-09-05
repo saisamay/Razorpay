@@ -11,7 +11,7 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Payment Recovery Investigation | Razorpay Intelligence</title>
+  <title>Revenue Economics & Payment Recovery Investigation | Razorpay Intelligence</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -89,6 +89,7 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
     .col-8 { grid-column: span 8; }
     .col-6 { grid-column: span 6; }
     .col-4 { grid-column: span 4; }
+    .col-2 { grid-column: span 2; }
 
     .card {
       background: var(--glass-bg);
@@ -130,6 +131,19 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
     .data-label { color: var(--text-secondary); font-size: 0.85rem; }
     .data-value { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; font-weight: 500; }
 
+    .stat-card {
+      background: rgba(26, 34, 52, 0.9);
+      border: 1px solid var(--border-color);
+      border-radius: 0.5rem;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .stat-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); font-weight: 600; margin-bottom: 0.5rem; }
+    .stat-value { font-family: 'JetBrains Mono', monospace; font-size: 1.6rem; font-weight: 700; color: #fff; }
+    .stat-subtext { font-size: 0.75rem; color: #64748b; margin-top: 0.4rem; }
+
     table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
     th, td { text-align: left; padding: 0.6rem; font-size: 0.85rem; border-bottom: 1px solid var(--border-color); }
     th { color: var(--text-secondary); font-weight: 500; }
@@ -148,8 +162,8 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
   <div class="container">
     <header>
       <div>
-        <h1>Payment Recovery Investigation</h1>
-        <div class="subtitle">Auditable, Compliance-Governed Post-Failure Recovery Intelligence | Read-Only Evaluation Interface</div>
+        <h1>Revenue Economics & Payment Recovery</h1>
+        <div class="subtitle">Revenue-at-Risk Monitoring, Recovery Attribution & Governance Evidence | Track 03</div>
       </div>
       <div class="case-selector">
         <input type="text" id="caseIdInput" value="rc_shadow_demo_001" placeholder="Enter RecoveryCase ID">
@@ -160,7 +174,7 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
     <div id="content" class="grid">
       <!-- Loading State -->
       <div class="col-12 card" style="text-align: center; padding: 3rem;">
-        <div style="font-size: 1.2rem; color: var(--text-secondary);">Loading Case Investigation Data...</div>
+        <div style="font-size: 1.2rem; color: var(--text-secondary);">Loading Case Investigation & Revenue Data...</div>
       </div>
     </div>
   </div>
@@ -171,24 +185,30 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
       const contentDiv = document.getElementById('content');
 
       try {
-        const response = await fetch(`/api/v2/evaluation/cases/${caseId}`);
-        if (!response.ok) {
+        const [caseResp, revResp] = await Promise.all([
+          fetch(`/api/v2/evaluation/cases/${caseId}`),
+          fetch(`/api/v2/evaluation/revenue-summary`)
+        ]);
+
+        if (!caseResp.ok) {
           contentDiv.innerHTML = `
             <div class="col-12 card" style="border-color: var(--accent-red);">
               <div class="card-title" style="color: var(--accent-red);">Investigation Failed</div>
-              <div style="padding: 1rem 0;">HTTP ${response.status}: Unable to retrieve evaluation projection for case <code>${caseId}</code>.</div>
+              <div style="padding: 1rem 0;">HTTP ${caseResp.status}: Unable to retrieve evaluation projection for case <code>${caseId}</code>.</div>
             </div>`;
           return;
         }
 
-        const data = await response.json();
-        renderDashboard(data);
+        const caseData = await caseResp.json();
+        const revData = revResp.ok ? await revResp.json() : null;
+
+        renderDashboard(caseData, revData);
       } catch (err) {
         contentDiv.innerHTML = `<div class="col-12 card" style="border-color: var(--accent-red);">Error: ${err.message}</div>`;
       }
     }
 
-    function renderDashboard(d) {
+    function renderDashboard(d, rev) {
       const content = document.getElementById('content');
       
       const p0 = d.genome ? d.genome.p0_source : {};
@@ -197,12 +217,138 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
       const shd = d.shadow_evaluation || {};
       const diag = d.diagnosis || {};
 
+      const revRisk = rev ? rev.revenue_at_risk_inr : 0;
+      const revEligible = rev ? rev.eligible_revenue_inr : 0;
+      const revGross = rev ? rev.gross_recovered_inr : 0;
+      const revNet = rev ? rev.net_verified_recovered_inr : 0;
+      const revRate = rev ? (rev.recovery_rate * 100) : 0;
+      const unrecovered = rev ? rev.unrecovered_revenue_inr : 0;
+
       content.innerHTML = `
-        <!-- Sec 1: Payment Metadata & Baseline -->
+        <!-- ======================================================== -->
+        <!-- 1. REVENUE RECOVERY OVERVIEW (TRACK 03 PRIMARY SECTION) -->
+        <!-- ======================================================== -->
+        <div class="col-12 card" style="border-color: var(--accent-blue);">
+          <div class="card-title" style="font-size: 1.1rem; color: #fff;">
+            <span>1. Revenue Recovery Overview</span>
+            <span class="badge badge-verified">REVENUE ECONOMICS LAYER</span>
+          </div>
+          <div class="grid" style="margin-top: 0.5rem;">
+            <!-- Card 1: ₹ Revenue at Risk -->
+            <div class="col-2 stat-card">
+              <div class="stat-title">₹ Revenue at Risk</div>
+              <div class="stat-value" style="color: var(--accent-amber);">₹${revRisk.toFixed(2)}</div>
+              <div class="stat-subtext">Total failed volume</div>
+            </div>
+
+            <!-- Card 2: ₹ Eligible Revenue -->
+            <div class="col-2 stat-card">
+              <div class="stat-title">₹ Eligible Revenue</div>
+              <div class="stat-value" style="color: var(--accent-blue);">₹${revEligible.toFixed(2)}</div>
+              <div class="stat-subtext">Compliant volume</div>
+            </div>
+
+            <!-- Card 3: ₹ Gross Recovered -->
+            <div class="col-2 stat-card">
+              <div class="stat-title">₹ Gross Recovered</div>
+              <div class="stat-value" style="color: #cbd5e1;">₹${revGross.toFixed(2)}</div>
+              <div class="stat-subtext">Gross recovered total</div>
+            </div>
+
+            <!-- Card 4: ₹ Net Verified Recovered -->
+            <div class="col-2 stat-card">
+              <div class="stat-title">₹ Net Verified</div>
+              <div class="stat-value" style="color: var(--accent-green);">₹${revNet.toFixed(2)}</div>
+              <div class="stat-subtext">Stage 3 verified net</div>
+            </div>
+
+            <!-- Card 5: Recovery Rate -->
+            <div class="col-2 stat-card">
+              <div class="stat-title">Recovery Rate</div>
+              <div class="stat-value" style="color: var(--accent-purple);">${revRate.toFixed(1)}%</div>
+              <div class="stat-subtext">Net verified / Eligible</div>
+            </div>
+
+            <!-- Card 6: Incremental Recovery -->
+            <div class="col-2 stat-card">
+              <div class="stat-title">₹ Incremental</div>
+              <div class="stat-value" style="font-size: 1.1rem; color: var(--text-secondary); padding-top: 0.4rem;">Not Established</div>
+              <div class="stat-subtext">F4 parameter required</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- 2. REVENUE BREAKDOWN & CASE-LEVEL TRACEABILITY -->
+        <!-- ======================================================== -->
         <div class="col-6 card">
           <div class="card-title">
-            <span>1. Payment Metadata</span>
-            <span class="badge badge-observed">${d.state.semantic_status}</span>
+            <span>2. Revenue Breakdown</span>
+            <span class="badge badge-observed">DETERMINISTIC AGGREGATION</span>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Stage / Scope Metric</th><th>Monetary Value (₹)</th><th>% of Revenue at Risk</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Revenue at Risk</strong></td>
+                <td>₹${revRisk.toFixed(2)}</td>
+                <td>100.0%</td>
+              </tr>
+              <tr>
+                <td><strong>Eligible Revenue</strong></td>
+                <td>₹${revEligible.toFixed(2)}</td>
+                <td>${revRisk > 0 ? ((revEligible / revRisk) * 100).toFixed(1) : 0}%</td>
+              </tr>
+              <tr>
+                <td><strong>Net Verified Recovered</strong></td>
+                <td style="color: var(--accent-green); font-weight: 700;">₹${revNet.toFixed(2)}</td>
+                <td>${revRisk > 0 ? ((revNet / revRisk) * 100).toFixed(1) : 0}%</td>
+              </tr>
+              <tr>
+                <td><strong>Unrecovered Revenue</strong></td>
+                <td style="color: var(--accent-red);">₹${unrecovered.toFixed(2)}</td>
+                <td>${revRisk > 0 ? ((unrecovered / revRisk) * 100).toFixed(1) : 0}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Case-Level Traceability Table -->
+        <div class="col-6 card">
+          <div class="card-title">
+            <span>Case-Level Revenue Traceability</span>
+            <span class="badge badge-observed">${rev ? rev.cases_breakdown.length : 0} CASES</span>
+          </div>
+          <div style="max-height: 220px; overflow-y: auto;">
+            <table>
+              <thead>
+                <tr><th>Case ID</th><th>Amount (₹)</th><th>Eligible</th><th>Outcome</th><th>Verified (₹)</th></tr>
+              </thead>
+              <tbody>
+                ${(rev && rev.cases_breakdown.length > 0) ? rev.cases_breakdown.map(c => `
+                  <tr style="${c.case_id === d.case_id ? 'background: rgba(59, 130, 246, 0.15); font-weight: bold;' : ''}">
+                    <td>${c.case_id.substring(0, 16)}...</td>
+                    <td>₹${c.amount_inr.toFixed(2)}</td>
+                    <td><span class="badge ${c.recovery_eligible ? 'badge-verified' : 'badge-blocked'}">${c.recovery_eligible ? 'YES' : 'NO'}</span></td>
+                    <td>${c.outcome_status}</td>
+                    <td style="color: var(--accent-green);">₹${c.net_verified_recovered_inr.toFixed(2)}</td>
+                  </tr>`).join('') : '<tr><td colspan="5" style="text-align:center; color:var(--text-secondary);">No cases found</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- PRESERVED TECHNICAL SECTIONS (BELOW REVENUE OVERVIEW)    -->
+        <!-- ======================================================== -->
+
+        <!-- Sec 3: Payment Metadata & Baseline -->
+        <div class="col-6 card">
+          <div class="card-title">
+            <span>3. Payment Metadata</span>
+            <span class="badge badge-observed">${d.state ? d.state.semantic_status : 'OBSERVED'}</span>
           </div>
           <div class="data-row"><span class="data-label">Case ID</span><span class="data-value">${d.case_id}</span></div>
           <div class="data-row"><span class="data-label">Payment ID</span><span class="data-value">${d.payment_id}</span></div>
@@ -215,7 +361,7 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
         <!-- Sec 13: Baseline & Execution Mode -->
         <div class="col-6 card">
           <div class="card-title">
-            <span>13. Baseline & Shadow Mode</span>
+            <span>Baseline & Shadow Mode</span>
             <span class="badge badge-shadow">PASSIVE_SHADOW</span>
           </div>
           <div class="data-row"><span class="data-label">Baseline Action (Control)</span><span class="data-value">${shd.baseline_action || 'STOP'}</span></div>
@@ -226,10 +372,10 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
           <div class="data-row"><span class="data-label">Execution Authority</span><span class="data-value" style="color: var(--accent-amber);">PASSIVE (0 Actions Executed)</span></div>
         </div>
 
-        <!-- Sec 3: Deterministic Diagnosis -->
+        <!-- Sec 4: Causal Diagnosis -->
         <div class="col-4 card">
           <div class="card-title">
-            <span>3. Causal Diagnosis</span>
+            <span>4. Causal Diagnosis</span>
             <span class="badge badge-verified">DETERMINISTIC</span>
           </div>
           <div class="data-row"><span class="data-label">Diagnosis Class</span><span class="data-value" style="color: var(--accent-blue);">${diag.diagnosis_class || 'UNKNOWN'}</span></div>
@@ -238,7 +384,7 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
           <div class="data-row"><span class="data-label">Score</span><span class="data-value">${diag.score || 0}</span></div>
         </div>
 
-        <!-- Sec 5: Incident Intelligence -->
+        <!-- Sec 5: Systemic Incident -->
         <div class="col-4 card">
           <div class="card-title">
             <span>5. Systemic Incident</span>
@@ -281,10 +427,10 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
           </table>
         </div>
 
-        <!-- Sec 8 & 9: Counterfactuals & Selected Proposal -->
+        <!-- Sec 8: Selected DecisionProposal -->
         <div class="col-6 card">
           <div class="card-title">
-            <span>8 & 9. Selected DecisionProposal</span>
+            <span>8. Selected DecisionProposal</span>
             <span class="badge badge-predicted">PROPOSED</span>
           </div>
           <div class="data-row"><span class="data-label">Selected Action</span><span class="data-value" style="color: var(--accent-purple); font-size: 1.1rem;">${prop.selected_action || 'STOP'}</span></div>
@@ -294,11 +440,11 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
           <div class="data-row"><span class="data-label">Optimizer Version</span><span class="data-value">v${prop.optimizer_version || '1.0'}</span></div>
         </div>
 
-        <!-- Sec 12: GenAI Non-Authoritative Explanation -->
+        <!-- Sec 9: GenAI Non-Authoritative Explanation -->
         ${d.genai_explanation ? `
         <div class="col-12 card ai-banner">
           <div class="card-title" style="border-bottom: none; margin-bottom: 0.5rem;">
-            <span>12. AI-Generated Decision Explanation</span>
+            <span>9. AI-Generated Decision Explanation</span>
             <span class="badge badge-shadow">NON-AUTHORITATIVE</span>
           </div>
           <div style="font-size: 0.95rem; line-height: 1.6; color: #e2e8f0;">
@@ -309,9 +455,9 @@ INVESTIGATION_UI_HTML = """<!DOCTYPE html>
           </div>
         </div>` : ''}
 
-        <!-- Sec 11: Provenance & Audit -->
+        <!-- Sec 10: Decision Provenance & Version Audit -->
         <div class="col-12 card">
-          <div class="card-title"><span>11. Decision Provenance & Version Audit</span></div>
+          <div class="card-title"><span>10. Decision Provenance & Version Audit</span></div>
           <div class="grid">
             <div class="col-4"><span class="data-label">Genome ID:</span> <span class="data-value">${p0.diagnosis_id ? 'genome_' + d.case_id : 'N/A'}</span></div>
             <div class="col-4"><span class="data-label">Proposal ID:</span> <span class="data-value">${prop.proposal_id || 'N/A'}</span></div>

@@ -351,3 +351,74 @@ class CaseAssignmentLink(BaseModel):
     assignment_arm: str
     assignment_status: str
     created_at: datetime
+
+
+# Step 2 Bounded AI Recovery Reasoner Contracts
+
+
+class CausalClaimSpec(BaseModel):
+    present: bool = False
+    evidence_ids: list[str] = Field(default_factory=list)
+    point_estimate: float | None = None
+
+
+class EvidenceItemSpec(BaseModel):
+    evidence_id: str
+    evidence_type: str  # STAGE1_CASE, STAGE2_DIAGNOSIS, FAILURE_DNA, RECOVERY_GENOME, F4_CAUSAL_REPORT, STAGE3_PERFORMANCE, REVENUE_SUMMARY
+    summary: str
+    is_causal: bool = False
+    evaluation_status: str | None = None
+    supersession_status: str | None = None
+    sample_size: int | None = None
+    point_estimate: float | None = None
+    confidence_interval: list[float] | None = None
+
+
+class SanitizedAIContext(BaseModel):
+    investigation_id: str
+    case_id: str
+    merchant_id: str
+    diagnosis_class: str
+    score: float
+    confidence: float
+    rail: str
+    rail_subtype: str
+    time_window: str
+    amount_bucket: str
+    incident_active: bool
+    candidate_interventions: list[dict[str, Any]] = Field(default_factory=list)
+    retrieved_evidence_manifest: list[EvidenceItemSpec] = Field(default_factory=list)
+
+
+class AIReasonerResponse(BaseModel):
+    investigation_id: str
+    case_id: str
+    merchant_id: str
+    reasoning_summary: str
+    recommended_intervention: str
+    intervention_rationale: str
+    supporting_evidence: list[str] = Field(default_factory=list)
+    conflicting_evidence: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    expected_tradeoffs: dict[str, Any] = Field(default_factory=dict)
+    recommended_next_step: str = "PREPARE_EXPERIMENT_DRAFT"
+    causal_claim: CausalClaimSpec = Field(default_factory=CausalClaimSpec)
+    authoritative: bool = False
+    validation_status: str = "VALID"  # VALID, FALLBACK
+    fallback_reason: str | None = None
+    learning_match_type: str = "NOVEL_CASE"  # NOVEL_CASE, STRONG_MATCH, WEAK_MATCH, CONFLICTING_EVIDENCE
+    openai_invoked: bool = True
+    knowledge_ids_used: list[str] = Field(default_factory=list)
+    learning_summary: str | None = None
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class CaseAIReasoningProjection(BaseModel):
+    case_id: str
+    merchant_id: str
+    investigation_id: str
+    reasoning: AIReasonerResponse
+    context_hash: str
+    generated_at: datetime
+
