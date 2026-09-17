@@ -1,34 +1,34 @@
 # AI Revenue Recovery
 
-> **An evidence-driven, AI-assisted payment recovery platform that connects reliable payment-state reconstruction, failure diagnosis, causal measurement, governance, recovery orchestration, and revenue measurement.**
+## Project Overview
 
-Built for **Razorpay Track 03 — AI Revenue Recovery**.
+**AI Revenue Recovery** is an evidence-driven payment recovery platform designed to help merchants understand, govern, and optimize the recovery of failed payments. Instead of treating every failure as a simple retry opportunity, the system reconstructs reliable payment state, diagnoses failure patterns, evaluates recovery eligibility, uses bounded AI reasoning to recommend interventions, measures causal impact through controlled experiments, applies governance before execution, and tracks recovery outcomes through completion.
 
-The project approaches failed payments as an end-to-end recovery problem rather than only a retry problem.
+The platform connects **Stage 1 → Stage 2 → F4 → F5 → Stage 3**, with a Revenue Economics layer that translates the recovery pipeline into measurable financial outcomes such as **Revenue at Risk, Eligible Revenue, Gross Recovered Revenue, Verified Recovered Revenue, and Incremental Recovery**.
+
+Its core distinction is the separation of **recommendation, measurement, authorization, execution, and verification**:
 
 ```text
 Payment Events
       ↓
-State Reconstruction
+Reliable State Reconstruction
       ↓
-RecoveryCase
+Failure Diagnosis
       ↓
-Diagnosis + Eligibility
+AI Recovery Recommendation
       ↓
-AI Recovery Reasoning
-      ↓
-F4 Causal Evidence
+F4 Causal Measurement
       ↓
 F5 Governance
       ↓
-Governed Dispatch
+Governed Recovery
       ↓
-Stage 3 Recovery Orchestration
-      ↓
-Outcome Observation
+Outcome Verification
       ↓
 Revenue Measurement
 ```
+
+This allows the system to answer not only **“Did we recover the payment?”**, but also **“Why did it fail, why was this intervention considered, was it governed, what happened after execution, and what evidence supports the resulting revenue impact?”**
 
 The central design principle is:
 
